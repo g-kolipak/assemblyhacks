@@ -14,6 +14,7 @@ async function start({ streamId, server }) {
     video: false,
   });
   ctx = new AudioContext({ latencyHint: "interactive" });
+  await ctx.resume(); // offscreen documents have no user gesture
   const source = ctx.createMediaStreamSource(stream);
 
   // Capturing mutes the tab, so play it back (through a gain node for ducking).

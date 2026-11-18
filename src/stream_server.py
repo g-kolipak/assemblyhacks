@@ -10,14 +10,16 @@ The extension captures a tab's audio (YouTube, podcasts, anything) and streams
      call for it (plus a correction for false claims) in the background.
   4. Streams captions and verdicts back to the extension as JSON.
 
-Keys stay on this machine; the extension never sees them.
+It also serves the BLINK website at / (tab sharing or microphone instead of
+the extension). Keys stay on the server; browsers never see them.
 
-    uv run python src/stream_server.py            # ws://127.0.0.1:8765/stream
+    uv run python src/stream_server.py            # http://127.0.0.1:8765
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -174,21 +176,68 @@ def result_event(
     }
 
 
-def origin_allowed(origin: str | None) -> bool:
-    """Only the extension (or a local tool with no Origin) may connect."""
+ROOT = Path(__file__).resolve().parent.parent
+WEB_DIR = ROOT / "web"
+EXTENSION_DIR = ROOT / "extension"
+# Website files: the page plus UI, audio and styles shared with the extension.
+STATIC_FILES = {
+    "/": WEB_DIR / "index.html",
+    "/app.js": WEB_DIR / "app.js",
+    "/site.css": WEB_DIR / "site.css",
+    "/ui.js": EXTENSION_DIR / "ui.js",
+    "/pcm-worklet.js": EXTENSION_DIR / "pcm-worklet.js",
+    "/sidepanel.css": EXTENSION_DIR / "sidepanel.css",
+}
+
+# Guard rails for a public deployment: every session spends API credits.
+ACCESS_CODE = os.environ.get("BLINK_ACCESS_CODE", "")
+MAX_SESSIONS = int(os.environ.get("BLINK_MAX_SESSIONS", "3"))
+MAX_SESSION_SECONDS = int(os.environ.get("BLINK_MAX_SESSION_MIN", "30")) * 60
+_active_sessions = 0
+
+
+def origin_allowed(origin: str | None, host: str | None = None) -> bool:
+    """The extension, this site itself, or a local tool with no Origin."""
     allowed = os.environ.get("FACTCHECK_ALLOWED_ORIGIN")
     if origin is None:
         return True
+    if host and origin.split("://", 1)[-1] == host:
+        return True  # the BLINK website served by this server
     if allowed:
-        return origin == allowed
+        return origin == allowed  # pin one extension ID
     return origin.startswith("chrome-extension://")
 
 
+def code_ok(code: str | None) -> bool:
+    if not ACCESS_CODE:
+        return True
+    return hmac.compare_digest((code or "").encode(), ACCESS_CODE.encode())
+
+
 async def stream_handler(request: web.Request) -> web.WebSocketResponse:
-    if not origin_allowed(request.headers.get("Origin")):
+    global _active_sessions
+    if not origin_allowed(request.headers.get("Origin"), request.host):
         raise web.HTTPForbidden(text="Origin not allowed")
     client = web.WebSocketResponse(heartbeat=20)
     await client.prepare(request)
+    if not code_ok(request.query.get("code")):
+        await client.send_json({"type": "error", "message": "Wrong access code."})
+        await client.close()
+        return client
+    if _active_sessions >= MAX_SESSIONS:
+        await client.send_json(
+            {"type": "error", "message": "BLINK is busy right now. Try again soon."}
+        )
+        await client.close()
+        return client
+    _active_sessions += 1
+    try:
+        return await _run_session(client)
+    finally:
+        _active_sessions -= 1
+
+
+async def _run_session(client: web.WebSocketResponse) -> web.WebSocketResponse:
     outbox: asyncio.Queue[dict] = asyncio.Queue()
     parallel = ParallelAPI()
     checker = FactChecker(gateway_chat(LLM_MODEL), parallel.decide_raw)
@@ -257,7 +306,16 @@ async def stream_handler(request: web.Request) -> web.WebSocketResponse:
             elif "error" in data:
                 outbox.put_nowait({"type": "error", "message": str(data["error"])})
 
+    async def time_limit() -> None:
+        await asyncio.sleep(MAX_SESSION_SECONDS)
+        outbox.put_nowait(
+            {"type": "error", "message": "Session time limit reached. Start again."}
+        )
+        await asyncio.sleep(0.2)
+        await client.close()
+
     sender = asyncio.create_task(send_loop())
+    limiter = asyncio.create_task(time_limit())
     try:
         async with aiohttp.ClientSession() as http:
             aai = await http.ws_connect(
@@ -289,18 +347,35 @@ async def stream_handler(request: web.Request) -> web.WebSocketResponse:
         while not outbox.empty():
             await client.send_json(outbox.get_nowait())
         sender.cancel()
+        limiter.cancel()
         await parallel.aclose()
         await client.close()
     return client
 
 
 async def health(_: web.Request) -> web.Response:
-    return web.json_response({"ok": True, "stt_model": STT_MODEL, "llm": LLM_MODEL})
+    return web.json_response(
+        {
+            "ok": True,
+            "stt_model": STT_MODEL,
+            "llm": LLM_MODEL,
+            "access_code_required": bool(ACCESS_CODE),
+        }
+    )
+
+
+def _static(path: Path):
+    async def handler(_: web.Request) -> web.FileResponse:
+        return web.FileResponse(path, headers={"Cache-Control": "no-cache"})
+
+    return handler
 
 
 def build_app() -> web.Application:
     app = web.Application()
     app.add_routes([web.get("/stream", stream_handler), web.get("/health", health)])
+    for route, path in STATIC_FILES.items():
+        app.router.add_get(route, _static(path))
     return app
 
 
@@ -311,9 +386,12 @@ def main() -> None:
     ]
     if missing:
         raise SystemExit(f"Set {', '.join(missing)} in .env.local first.")
-    port = int(os.environ.get("FACTCHECK_PORT", "8765"))
-    # Bind to localhost only: this server spends your API credits.
-    web.run_app(build_app(), host="127.0.0.1", port=port)
+    # On Railway (PORT is set) listen publicly; locally, localhost only.
+    hosted = "PORT" in os.environ
+    port = int(os.environ.get("PORT") or os.environ.get("FACTCHECK_PORT", "8765"))
+    if hosted and not ACCESS_CODE:
+        logger.warning("BLINK_ACCESS_CODE is not set: anyone can spend your credits.")
+    web.run_app(build_app(), host="0.0.0.0" if hosted else "127.0.0.1", port=port)
 
 
 if __name__ == "__main__":

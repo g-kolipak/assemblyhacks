@@ -1,0 +1,12 @@
+main { max-width: 720px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 22px; }
+.start { margin: 16px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+fieldset { border: 0; margin: 0; padding: 0; }
+legend { font-weight: 600; margin-bottom: 6px; }
+.choice { display: flex; gap: 8px; align-items: flex-start; color: var(--fg); font-size: 14px; margin: 8px 0; }
+.choice input { margin-top: 3px; }
+#code { display: block; width: 100%; margin-top: 4px; padding: 6px; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 4px; }
+button.primary { margin-top: 8px; padding: 8px 16px; font-weight: 600; background: var(--seg-detect); color: #fff; border: 0; }
+button:disabled { opacity: .6; cursor: default; }
+footer { margin-top: 24px; font-size: 12px; }
+@media (max-width: 480px) { main { padding: 12px; } }

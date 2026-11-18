@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BLINK</title>
+  <meta name="description" content="BLINK checks your facts faster than you blink: live fact-checking for YouTube, podcasts and anything you can hear." />
+  <link rel="stylesheet" href="/sidepanel.css" />
+  <link rel="stylesheet" href="/site.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>BLINK</h1>
+        <p class="muted tagline">Checks your facts faster than you blink</p>
+        <p id="status" class="muted">Pick a source and press Start.</p>
+      </div>
+      <button id="stop" hidden>Stop</button>
+    </header>
+
+    <form id="start-form" class="start">
+      <fieldset>
+        <legend>Listen to</legend>
+        <label class="choice"><input type="radio" name="source" value="tab" checked />
+          <span><strong>A browser tab</strong> (YouTube, podcasts…). Chrome or Edge: pick the tab and tick <em>Also share tab audio</em>.</span></label>
+        <label class="choice"><input type="radio" name="source" value="mic" />
+          <span><strong>Microphone</strong>: you talking, or audio playing in the room. Works in any browser.</span></label>
+      </fieldset>
+      <label id="code-row" hidden>Access code
+        <input id="code" type="password" autocomplete="off" />
+      </label>
+      <button id="start" class="primary" type="submit">Start fact-checking</button>
+    </form>
+
+    <section id="caption" class="caption muted">Live captions appear here.</section>
+    <section id="feed" aria-live="polite"></section>
+
+    <details>
+      <summary>Settings</summary>
+      <label>Say out loud
+        <select id="speak">
+          <option value="all">Every verdict</option>
+          <option value="false">Only false or misleading (with the right answer)</option>
+          <option value="off">Nothing (show only)</option>
+        </select>
+      </label>
+      <label>Voice speed
+        <input id="rate" type="range" min="0.8" max="1.8" step="0.05" value="1.15" />
+      </label>
+    </details>
+    <footer class="muted">Audio is transcribed by AssemblyAI; claims are checked on the live web with Parallel.</footer>
+  </main>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

@@ -119,6 +119,38 @@ Measured on a real podcast-style clip, verdicts arrive about 1.4–2.7 seconds a
 
 **Privacy:** tab audio is sent to AssemblyAI to be transcribed, and claims are sent to Parallel and the AssemblyAI LLM gateway. The backend binds to `127.0.0.1` and only accepts connections from Chrome extensions.
 
+## BLINK website (no extension needed)
+
+`stream_server.py` also serves BLINK as a website, using the same pipeline, cards and latency meters as the extension.
+
+```sh
+uv run python src/stream_server.py      # open http://127.0.0.1:8765
+```
+
+Choose what to listen to and press **Start**:
+- **A browser tab:** in Chrome or Edge, pick the YouTube or podcast tab and tick **"Also share tab audio"**. Safari and Firefox can't share tab audio.
+- **Microphone:** you talking, or audio playing in the room. Works in any browser. While BLINK is speaking, the mic stream is muted so BLINK doesn't fact-check itself.
+
+### Deploy to Railway
+
+`railway.json` builds `Dockerfile.blink`. The server listens on Railway's `$PORT`, and `/health` is the health check.
+
+```sh
+railway login
+railway init                                   # create the project
+railway variables --set ASSEMBLYAI_API_KEY=... --set PARALLEL_API_KEY=... \
+                  --set BLINK_ACCESS_CODE=choose-a-code
+railway up                                     # build and deploy
+railway domain                                 # get the public https URL
+```
+
+A public site spends **your** API credits, so these limits are built in:
+- `BLINK_ACCESS_CODE`: visitors must enter this code. **Set it.**
+- `BLINK_MAX_SESSIONS`: maximum sessions at once (default 3).
+- `BLINK_MAX_SESSION_MIN`: each session is cut off after this many minutes (default 30).
+
+The extension can use the hosted server too. Set its server URL to `wss://<your-app>.up.railway.app/stream?code=<code>`.
+
 ## Credits
 
 This project is based on [hsingh-aai/assemblyai-parallel-voice-agent](https://github.com/hsingh-aai/assemblyai-parallel-voice-agent). The upstream code has no license file yet, and we have asked its author to add one. Until that happens, the upstream portions remain the original author's work.

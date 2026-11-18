@@ -74,8 +74,22 @@ def test_origin_check(monkeypatch):
     assert origin_allowed("chrome-extension://abcdef")
     assert origin_allowed(None)
     assert not origin_allowed("https://evil.example")
+    # The website served by this same host may connect.
+    assert origin_allowed("https://blink.up.railway.app", "blink.up.railway.app")
+    assert not origin_allowed("https://evil.example", "blink.up.railway.app")
     monkeypatch.setenv("FACTCHECK_ALLOWED_ORIGIN", "chrome-extension://mine")
     assert not origin_allowed("chrome-extension://other")
+    assert origin_allowed("chrome-extension://mine")
+
+
+def test_access_code(monkeypatch):
+    import stream_server
+
+    monkeypatch.setattr(stream_server, "ACCESS_CODE", "")
+    assert stream_server.code_ok(None)
+    monkeypatch.setattr(stream_server, "ACCESS_CODE", "s3cret")
+    assert stream_server.code_ok("s3cret")
+    assert not stream_server.code_ok("nope") and not stream_server.code_ok(None)
 
 
 def test_result_event_shape():
@@ -89,7 +103,10 @@ def test_result_event_shape():
 
 def test_app_routes():
     paths = {r.resource.canonical for r in build_app().router.routes()}
-    assert {"/stream", "/health"} <= paths
+    assert {"/stream", "/health", "/", "/app.js", "/ui.js", "/pcm-worklet.js"} <= paths
+    import stream_server
+
+    assert all(p.exists() for p in stream_server.STATIC_FILES.values())
 
 
 async def test_stream_end_to_end_with_fakes(monkeypatch):

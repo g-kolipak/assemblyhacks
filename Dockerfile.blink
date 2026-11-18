@@ -1,0 +1,17 @@
+# BLINK website + streaming fact-check server (Railway, Fly.io, Render, ...).
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+
+ENV PYTHONUNBUFFERED=1 UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev
+
+COPY src ./src
+COPY web ./web
+COPY extension ./extension
+
+# Railway injects PORT; the server then listens on 0.0.0.0:$PORT.
+CMD ["uv", "run", "--no-dev", "python", "src/stream_server.py"]
