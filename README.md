@@ -73,6 +73,44 @@ Try saying: "The Great Wall of China is visible from the Moon, and Mount Everest
 
 A probability of 0.75 or higher counts as true, 0.25 or lower as false, and anything between 0.25 and 0.45 as misleading. Everything else is reported as "couldn't verify". To change these cutoffs, edit `Thresholds` in `src/fact_check.py`.
 
+## Chrome extension: fact-check YouTube and podcasts live
+
+The `extension/` folder is a Chrome extension. It fact-checks whatever is playing in a tab, such as a YouTube video, a podcast or a live stream, and reads every verdict out loud while the video keeps playing.
+
+```
+Tab audio ──tabCapture──▶ offscreen doc ──16 kHz PCM / WebSocket──▶ stream_server.py (localhost)
+                                                                     │  AssemblyAI streaming STT
+                                                                     │  sentence cut while still talking
+                                                                     │  claim extraction (AssemblyAI LLM gateway)
+                                                                     │  Parallel Decisions: one live web call per sentence
+side panel + chrome.tts (spoken verdict) ◀────────── verdict JSON ──┘
+```
+
+**1. Start the backend.** It keeps your API keys on your machine, so the extension never sees them.
+
+```sh
+# .env.local needs ASSEMBLYAI_API_KEY and PARALLEL_API_KEY
+uv run python src/stream_server.py      # listens on ws://127.0.0.1:8765/stream
+```
+
+**2. Load the extension.** Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and choose the `extension/` folder.
+
+**3. Use it.** Open a video and click the extension's toolbar icon. A side panel opens with live captions and a feed of verdict cards. Each card shows True, False, Misleading or Unverified, the probability, the **right answer** for anything false, the source, and how many seconds after the sentence the verdict arrived. Every verdict is also spoken, and the video's volume drops while the voice talks. Click the icon again, or **Stop**, to end.
+
+### How it stays fast
+
+- Audio streams continuously in 50 ms frames. Nothing waits for the video to end.
+- Sentences are cut as soon as AssemblyAI marks their words final, even mid-monologue (`FACTCHECK_FLUSH_WORDS`, default 18). Podcasters rarely pause, so the backend doesn't wait for one.
+- Each sentence makes **one** Parallel Decisions call (`model: "fast"`, usually under a second), with every claim in that sentence batched together. Sentences are checked concurrently, so a slow check never holds up the next one.
+- True verdicts are sent the moment Decisions answers. Only false claims pay for the extra correction step.
+- The spoken verdict uses Chrome's built-in text-to-speech, so there's no extra network hop.
+
+In practice, a verdict arrives about one to two seconds after a sentence ends. The latency is shown on every card.
+
+**Settings** (in the side panel): what to say out loud (every verdict, only false ones, or nothing), voice speed, and the server URL. Backend settings are `AAI_MIN_TURN_SILENCE`, `AAI_MAX_TURN_SILENCE`, `FACTCHECK_FLUSH_WORDS` and `FACTCHECK_PORT`.
+
+**Privacy:** tab audio is sent to AssemblyAI to be transcribed, and claims are sent to Parallel and the AssemblyAI LLM gateway. The backend binds to `127.0.0.1` and only accepts connections from Chrome extensions.
+
 ## Credits
 
 This project is based on [hsingh-aai/assemblyai-parallel-voice-agent](https://github.com/hsingh-aai/assemblyai-parallel-voice-agent). The upstream code has no license file yet, and we have asked its author to add one. Until that happens, the upstream portions remain the original author's work.

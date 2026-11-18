@@ -1,0 +1,37 @@
+:root {
+  --bg: #ffffff; --fg: #1f1f1f; --muted: #5f6368; --card: #f6f8fa; --line: #e3e6ea;
+  --true: #188038; --false: #c5221f; --misleading: #b06000; --unverified: #5f6368;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1f1f1f; --fg: #e8eaed; --muted: #9aa0a6; --card: #2a2b2e; --line: #3c4043;
+    --true: #81c995; --false: #f28b82; --misleading: #fdd663; --unverified: #9aa0a6;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 12px; font: 14px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+h1 { font-size: 16px; margin: 0 0 2px; }
+.muted { color: var(--muted); }
+#status { margin: 0; font-size: 12px; }
+button { border: 1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 6px; padding: 4px 12px; cursor: pointer; }
+.caption { margin: 12px 0; padding: 8px 10px; border-left: 3px solid var(--line); min-height: 2.9em; font-style: italic; }
+#feed { display: flex; flex-direction: column-reverse; gap: 8px; }
+.card { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--unverified); border-radius: 8px; padding: 8px 10px; }
+.card.true { border-left-color: var(--true); }
+.card.false { border-left-color: var(--false); }
+.card.misleading { border-left-color: var(--misleading); }
+.badge { font-weight: 700; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+.true .badge { color: var(--true); } .false .badge { color: var(--false); }
+.misleading .badge { color: var(--misleading); } .unverified .badge { color: var(--unverified); }
+.claim { margin: 2px 0; }
+.fix { margin: 4px 0 0; font-weight: 600; }
+.meta { font-size: 11px; color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
+.meta a { color: inherit; }
+.card.pending { border-left-style: dashed; opacity: .75; }
+.error { color: var(--false); font-size: 12px; }
+details { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 8px; }
+label { display: block; margin: 8px 0; font-size: 12px; color: var(--muted); }
+select, input[type=text] { display: block; width: 100%; margin-top: 4px; padding: 4px; background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 4px; }
+input[type=range] { width: 100%; }

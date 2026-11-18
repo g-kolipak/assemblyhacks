@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Live Fact Checker</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Live Fact Checker</h1>
+      <p id="status" class="muted">Open a YouTube video or podcast, then click the toolbar icon.</p>
+    </div>
+    <button id="stop" hidden>Stop</button>
+  </header>
+
+  <section id="caption" class="caption muted">Live captions appear here.</section>
+
+  <section id="feed" aria-live="polite"></section>
+
+  <details>
+    <summary>Settings</summary>
+    <label>Say out loud
+      <select id="speak">
+        <option value="all">Every verdict</option>
+        <option value="false">Only false or misleading (with the right answer)</option>
+        <option value="off">Nothing (show only)</option>
+      </select>
+    </label>
+    <label>Voice speed
+      <input id="rate" type="range" min="0.8" max="1.8" step="0.05" />
+    </label>
+    <label>Server
+      <input id="server" type="text" spellcheck="false" />
+    </label>
+  </details>
+  <script src="sidepanel.js" type="module"></script>
+</body>
+</html>
