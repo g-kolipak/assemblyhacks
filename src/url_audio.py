@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger("factcheck.url")
@@ -56,26 +59,61 @@ class Media:
     headers: dict[str, str]
 
 
+# YouTube often asks cloud servers to "confirm you're not a bot". Some player
+# clients are challenged less, so try them in turn. YTDLP_COOKIES (a Netscape
+# cookies.txt body) or YTDLP_PROXY (e.g. a residential proxy) lift the block.
+CLIENTS = [None, "tv", "web_embedded", "android_vr", "mweb", "web_safari", "ios"]
+
+
+def _cookie_file() -> str | None:
+    body = os.environ.get("YTDLP_COOKIES", "").strip()
+    if not body:
+        return None
+    path = Path(tempfile.gettempdir()) / "blink-yt-cookies.txt"
+    if not path.exists():
+        path.write_text(body + "\n")
+        path.chmod(0o600)
+    return str(path)
+
+
 def _resolve(video_id: str) -> Media:
     import yt_dlp
 
-    opts = {
+    base: dict = {
         "format": "bestaudio/best",
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(
-            f"https://www.youtube.com/watch?v={video_id}", download=False
+    if proxy := os.environ.get("YTDLP_PROXY"):
+        base["proxy"] = proxy
+    if cookies := _cookie_file():
+        base["cookiefile"] = cookies
+    first_error: Exception | None = None
+    for client in CLIENTS:
+        opts = dict(base)
+        if client:
+            opts["extractor_args"] = {"youtube": {"player_client": [client]}}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(
+                    f"https://www.youtube.com/watch?v={video_id}", download=False
+                )
+        except Exception as e:  # try the next client
+            logger.info("yt-dlp client %s failed: %s", client or "default", e)
+            first_error = first_error or e
+            continue
+        if not info.get("url"):
+            continue
+        logger.info("Resolved %s with client %s", video_id, client or "default")
+        return Media(
+            video_id=video_id,
+            title=info.get("title") or "YouTube video",
+            duration=info.get("duration"),
+            stream_url=info["url"],
+            headers=info.get("http_headers") or {},
         )
-    return Media(
-        video_id=video_id,
-        title=info.get("title") or "YouTube video",
-        duration=info.get("duration"),
-        stream_url=info["url"],
-        headers=info.get("http_headers") or {},
-    )
+    raise first_error or RuntimeError("No playable audio found")
 
 
 async def resolve(video_id: str) -> Media:
