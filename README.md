@@ -1,4 +1,9 @@
-# AssemblyAI + Parallel voice starter
+# BLINK
+
+**Checks your facts faster than you blink.** BLINK listens to live audio, such as a YouTube video, a podcast or you talking, and checks every factual claim against the live web while the audio keeps playing. It reads each verdict out loud, with the right answer for anything false. It is built on AssemblyAI streaming speech-to-text and Parallel Decisions.
+
+## Voice agent starter (original project)
+
 
 Talk to a voice agent in your terminal. AssemblyAI handles speech and replies. Parallel’s hosted MCP server gives the agent three tools: Search finds evidence, Fetch reads a particular public page, and Decisions estimates a probability or chooses among supplied options. The first conversation only needs an AssemblyAI key. [Parallel MCP](https://docs.parallel.ai/integrations/mcp/quickstart)
 
@@ -73,7 +78,7 @@ Try saying: "The Great Wall of China is visible from the Moon, and Mount Everest
 
 A probability of 0.75 or higher counts as true, 0.25 or lower as false, and anything between 0.25 and 0.45 as misleading. Everything else is reported as "couldn't verify". To change these cutoffs, edit `Thresholds` in `src/fact_check.py`.
 
-## Chrome extension: fact-check YouTube and podcasts live
+## BLINK Chrome extension: fact-check YouTube and podcasts live
 
 The `extension/` folder is a Chrome extension. It fact-checks whatever is playing in a tab, such as a YouTube video, a podcast or a live stream, and reads every verdict out loud while the video keeps playing.
 

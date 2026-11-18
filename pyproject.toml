@@ -1,5 +1,5 @@
 [project]
-name = "assemblyai-parallel-voice-agent"
+name = "blink"
 version = "0.1.0"
 description = "Starter for LiveKit voice agents that search the live web with Parallel, using AssemblyAI for speech-to-text and text-to-speech."
 readme = "README.md"

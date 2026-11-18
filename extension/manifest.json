@@ -1,11 +1,24 @@
 {
   "manifest_version": 3,
-  "name": "Live Fact Checker",
+  "name": "BLINK",
   "version": "0.1.0",
-  "description": "Fact-checks what's said in YouTube videos, podcasts and any tab audio in real time, using AssemblyAI streaming and Parallel Decisions.",
+  "description": "BLINK checks your facts faster than you blink: live fact-checking for YouTube, podcasts and any tab audio, powered by AssemblyAI streaming and Parallel Decisions.",
   "minimum_chrome_version": "116",
-  "permissions": ["tabCapture", "offscreen", "sidePanel", "tts", "storage"],
-  "background": { "service_worker": "background.js", "type": "module" },
-  "action": { "default_title": "Fact-check this tab" },
-  "side_panel": { "default_path": "sidepanel.html" }
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "sidePanel",
+    "tts",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "BLINK: fact-check this tab"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  }
 }
