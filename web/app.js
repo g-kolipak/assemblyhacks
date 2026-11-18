@@ -8,6 +8,7 @@ let ctx, stream, ws, worklet, source, analyser, levelTimer;
 let speaking = false;
 let pendingChecks = 0;
 let objectUrl = null;
+let runId = 0;
 
 const noop = () => {};
 let eye = { setListening: noop, setChecking: noop, setLevel: noop, verdict: noop, poke: noop };
@@ -116,7 +117,12 @@ async function capture(kind) {
 // An uploaded file plays in the page; its audio goes both to the speakers
 // and to the fact-checker, exactly like a shared tab.
 function fileSource(file) {
-  const player = $("player");
+  // A media element can feed only one AudioContext ever, so every run gets a
+  // fresh <video> element.
+  const old = $("player");
+  const player = old.cloneNode(false);
+  player.removeAttribute("src");
+  old.replaceWith(player);
   if (objectUrl) URL.revokeObjectURL(objectUrl);
   objectUrl = URL.createObjectURL(file);
   player.src = objectUrl;
@@ -131,16 +137,38 @@ function fileSource(file) {
   return node;
 }
 
-function speak(event) {
-  const mode = $("speak").value;
-  const flagged = event.verdict === "false" || event.verdict === "misleading";
-  if (mode === "off" || (mode === "false" && !flagged) || !("speechSynthesis" in window)) return;
-  const u = new SpeechSynthesisUtterance(event.speak);
-  u.rate = Number($("rate").value);
-  // In mic mode the mic would hear blink talking; mute the stream meanwhile.
-  u.onstart = () => { speaking = true; };
-  u.onend = u.onerror = () => { speaking = speechSynthesis.speaking; };
-  speechSynthesis.speak(u);
+// Verdicts are spoken by an AssemblyAI voice: the server sends each clip as a
+// "speech" event and they play one after another. If TTS failed, the
+// browser's own voice reads the text instead.
+const voiceQueue = [];
+let voiceBusy = false;
+
+function playNextVoice() {
+  if (voiceBusy || !voiceQueue.length) return;
+  const clip = voiceQueue.shift();
+  voiceBusy = true;
+  speaking = true; // in mic mode, don't let the mic hear blink talking
+  const done = () => { voiceBusy = false; speaking = false; playNextVoice(); };
+  const rate = Number($("rate").value);
+  if (clip.audio) {
+    const audio = new Audio(`data:audio/wav;base64,${clip.audio}`);
+    audio.playbackRate = rate;
+    audio.onended = audio.onerror = done;
+    audio.play().catch(done);
+  } else if (clip.fallback && "speechSynthesis" in window) {
+    const u = new SpeechSynthesisUtterance(clip.fallback);
+    u.rate = rate;
+    u.onend = u.onerror = done;
+    speechSynthesis.speak(u);
+  } else {
+    done();
+  }
+}
+
+function queueVoice(event) {
+  if ($("speak").value === "off") return;
+  voiceQueue.push(event);
+  playNextVoice();
 }
 
 function onEvent(event) {
@@ -150,6 +178,7 @@ function onEvent(event) {
     $("status").textContent = `Watching “${event.title}”`;
     showVideo(event.video_id).catch((err) => render({ type: "error", message: err.message }));
   }
+  if (event.type === "speech") queueVoice(event);
   if (event.type === "ended") {
     $("status").textContent = "Video finished. Wrapping up the last checks…";
   }
@@ -162,7 +191,6 @@ function onEvent(event) {
     eye.setChecking(pendingChecks > 0);
     eye.verdict(event.verdict);
     count(event.verdict);
-    speak(event);
   }
   if (event.type === "closed") {
     pendingChecks = 0;
@@ -175,13 +203,25 @@ function onEvent(event) {
 function connect(params) {
   const code = $("code").value.trim();
   if (code) { store.set("blink.code", code); params.set("code", code); }
+  params.set("speak", $("speak").value);
+  voiceQueue.length = 0;
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const qs = params.toString() ? `?${params}` : "";
-  ws = new WebSocket(`${proto}://${location.host}/stream${qs}`);
-  ws.binaryType = "arraybuffer";
-  ws.onmessage = (e) => onEvent(JSON.parse(e.data));
-  ws.onerror = () => render({ type: "error", message: "Lost the connection to the blink server. Press start to try again." });
-  ws.onclose = () => { onEvent({ type: "closed" }); stop(); };
+  // Each run gets its own id. A stopped run's socket keeps delivering its last
+  // verdicts until the server closes it, but must never touch a newer run.
+  const run = ++runId;
+  const sock = new WebSocket(`${proto}://${location.host}/stream${qs}`);
+  ws = sock;
+  sock.binaryType = "arraybuffer";
+  sock.onmessage = (e) => { if (run === runId) onEvent(JSON.parse(e.data)); };
+  sock.onerror = () => {
+    if (run === runId) render({ type: "error", message: "Lost the connection to the blink server. Press start to try again." });
+  };
+  sock.onclose = () => {
+    if (run !== runId) return;
+    onEvent({ type: "closed" });
+    if (ws === sock) stop();
+  };
   document.body.classList.add("live");
   $("start-form").hidden = true;
   $("stop").hidden = false;
@@ -257,7 +297,7 @@ async function stop() {
   if (ctx) await ctx.close().catch(() => {});
   ctx = stream = worklet = source = analyser = null;
   eye.setListening(false);
-  if ("speechSynthesis" in window && $("speak").value === "off") speechSynthesis.cancel();
+  if ($("speak").value === "off") voiceQueue.length = 0;
   $("start-form").hidden = false;
   $("stop").hidden = true;
 }

@@ -19,6 +19,7 @@ the extension). Keys stay on the server; browsers never see them.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
 import json
 import logging
@@ -32,6 +33,7 @@ from aiohttp import web
 from dotenv import dotenv_values, load_dotenv
 
 import url_audio
+import voice
 from fact_check import CheckResult, FactChecker, gateway_chat
 from parallel_api import ParallelAPI
 
@@ -246,9 +248,12 @@ async def stream_handler(request: web.Request) -> web.WebSocketResponse:
             )
             await client.close()
             return client
+    speak_mode = request.query.get("speak", "all")
+    if speak_mode not in ("all", "false", "off"):
+        speak_mode = "all"
     _active_sessions += 1
     try:
-        return await _run_session(client, video_id)
+        return await _run_session(client, video_id, speak_mode)
     finally:
         _active_sessions -= 1
 
@@ -322,7 +327,9 @@ async def _stream_youtube(
 
 
 async def _run_session(
-    client: web.WebSocketResponse, video_id: str | None = None
+    client: web.WebSocketResponse,
+    video_id: str | None = None,
+    speak_mode: str = "all",
 ) -> web.WebSocketResponse:
     outbox: asyncio.Queue[dict] = asyncio.Queue()
     parallel = ParallelAPI()
@@ -346,14 +353,38 @@ async def _run_session(
                 "elapsed_ms": round(detect_s * 1000),
             }
         )
+
+        def emit(result: CheckResult) -> None:
+            event = result_event(result, who, heard_at, detect_s)
+            outbox.put_nowait(event)
+            flagged = event["verdict"] in ("false", "misleading")
+            if speak_mode == "all" or (speak_mode == "false" and flagged):
+                task = asyncio.create_task(say(event))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
+
         try:
-            await checker.check_claims(
-                claims,
-                lambda r: outbox.put_nowait(result_event(r, who, heard_at, detect_s)),
-            )
+            await checker.check_claims(claims, emit)
         except Exception as e:
             logger.exception("Fact check failed")
             outbox.put_nowait({"type": "error", "message": f"Fact check failed: {e}"})
+
+    async def say(event: dict) -> None:
+        # Human voice from AssemblyAI TTS; the browser voice is the fallback.
+        try:
+            wav = await voice.synthesize(event["speak"])
+            outbox.put_nowait(
+                {
+                    "type": "speech",
+                    "claim": event["claim"],
+                    "audio": base64.b64encode(wav).decode(),
+                }
+            )
+        except Exception as e:
+            logger.warning("AssemblyAI TTS failed: %s", e)
+            outbox.put_nowait(
+                {"type": "speech", "claim": event["claim"], "fallback": event["speak"]}
+            )
 
     def on_claims(claims: list[str], heard_at: float, detect_s: float) -> None:
         # Fire the Decisions call immediately; detection keeps running.
