@@ -43,3 +43,7 @@ Try a library compatibility assistant. Set `AGENT_GREETING="Which library are yo
 **Standalone API example.** To call Parallel directly from your own app, set `PARALLEL_API_KEY` with a [Parallel key](https://platform.parallel.ai). [parallel_api.py](src/parallel_api.py) has the two API calls and only needs `parallel-web`. [try_parallel.py](scripts/try_parallel.py) shows how to use them.
 
 [Setup help](docs/advanced.md#troubleshooting) · [Browser and deployment options](docs/advanced.md#browser-or-room)
+
+## Credits
+
+This project is based on [hsingh-aai/assemblyai-parallel-voice-agent](https://github.com/hsingh-aai/assemblyai-parallel-voice-agent). The upstream code has no license file yet, and we have asked its author to add one. Until that happens, the upstream portions remain the original author's work.
