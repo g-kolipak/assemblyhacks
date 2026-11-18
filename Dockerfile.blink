@@ -2,7 +2,9 @@
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 
 ENV PYTHONUNBUFFERED=1 UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+# ffmpeg decodes YouTube audio; yt-dlp needs a JavaScript runtime (Deno) for YouTube.
+COPY --from=denoland/deno:bin-2.1.4 /deno /usr/local/bin/deno
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

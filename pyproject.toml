@@ -9,6 +9,7 @@ dependencies = [
     "livekit-plugins-assemblyai-tts",
     "parallel-web>=1.3",
     "python-dotenv",
+    "yt-dlp[default]>=2026.10.21",
 ]
 
 [dependency-groups]

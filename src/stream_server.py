@@ -31,6 +31,7 @@ import aiohttp
 from aiohttp import web
 from dotenv import dotenv_values, load_dotenv
 
+import url_audio
 from fact_check import CheckResult, FactChecker, gateway_chat
 from parallel_api import ParallelAPI
 
@@ -187,6 +188,12 @@ STATIC_FILES = {
     "/ui.js": EXTENSION_DIR / "ui.js",
     "/pcm-worklet.js": EXTENSION_DIR / "pcm-worklet.js",
     "/sidepanel.css": EXTENSION_DIR / "sidepanel.css",
+    "/scene.js": WEB_DIR / "scene.js",
+    "/img/logo.png": WEB_DIR / "img" / "logo.png",
+    "/img/wordmark.png": WEB_DIR / "img" / "wordmark.png",
+    "/img/icon.png": WEB_DIR / "img" / "icon.png",
+    "/img/favicon.png": WEB_DIR / "img" / "favicon.png",
+    "/img/og.png": WEB_DIR / "img" / "og.png",
 }
 
 # Guard rails for a public deployment: every session spends API credits.
@@ -230,14 +237,88 @@ async def stream_handler(request: web.Request) -> web.WebSocketResponse:
         )
         await client.close()
         return client
+    video_id = None
+    if request.query.get("youtube"):
+        video_id = url_audio.youtube_id(request.query["youtube"])
+        if not video_id:
+            await client.send_json(
+                {"type": "error", "message": "That isn't a YouTube video link."}
+            )
+            await client.close()
+            return client
     _active_sessions += 1
     try:
-        return await _run_session(client)
+        return await _run_session(client, video_id)
     finally:
         _active_sessions -= 1
 
 
-async def _run_session(client: web.WebSocketResponse) -> web.WebSocketResponse:
+async def _stream_youtube(
+    client: web.WebSocketResponse,
+    aai: aiohttp.ClientWebSocketResponse,
+    video_id: str,
+    outbox: asyncio.Queue[dict],
+) -> None:
+    """Feed a YouTube video's audio to AssemblyAI, following the viewer's
+    embed: "play:<seconds>" starts or seeks, "pause" holds, "stop" ends."""
+    try:
+        media = await url_audio.resolve(video_id)
+    except Exception as e:
+        reason = str(e).replace("ERROR: ", "").splitlines()[0][:200]
+        logger.warning("Could not load YouTube video %s: %s", video_id, reason)
+        outbox.put_nowait(
+            {"type": "error", "message": f"Couldn't load that YouTube video: {reason}"}
+        )
+        return
+    player = url_audio.Player(media)
+    outbox.put_nowait(
+        {
+            "type": "media",
+            "video_id": video_id,
+            "title": media.title,
+            "duration": media.duration,
+        }
+    )
+
+    async def controls() -> None:
+        async for msg in client:
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                continue
+            cmd, _, arg = msg.data.partition(":")
+            if cmd == "stop":
+                return
+            if cmd == "pause":
+                player.pause()
+            elif cmd == "play":
+                try:
+                    at = float(arg or 0)
+                except ValueError:
+                    continue
+                await player.play(at)
+
+    async def pump() -> None:
+        loop = asyncio.get_running_loop()
+        next_at = loop.time()
+        while not aai.closed:
+            await aai.send_bytes(await player.chunk())
+            if player.ended:
+                outbox.put_nowait({"type": "ended"})
+                return
+            next_at += url_audio.CHUNK_S
+            await asyncio.sleep(max(0.0, next_at - loop.time()))
+
+    jobs = {asyncio.create_task(controls()), asyncio.create_task(pump())}
+    try:
+        await asyncio.wait(jobs, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for job in jobs:
+            job.cancel()
+        await player.close()
+
+
+async def _run_session(
+    client: web.WebSocketResponse, video_id: str | None = None
+) -> web.WebSocketResponse:
     outbox: asyncio.Queue[dict] = asyncio.Queue()
     parallel = ParallelAPI()
     checker = FactChecker(gateway_chat(LLM_MODEL), parallel.decide_raw)
@@ -323,15 +404,18 @@ async def _run_session(client: web.WebSocketResponse) -> web.WebSocketResponse:
                 headers={"Authorization": os.environ["ASSEMBLYAI_API_KEY"]},
             )
             reader = asyncio.create_task(from_assemblyai(aai))
-            async for msg in client:
-                if aai.closed:
-                    break
-                if msg.type == aiohttp.WSMsgType.BINARY:
-                    data = msg.data
-                    for i in range(0, len(data), MAX_FRAME_BYTES):
-                        await aai.send_bytes(data[i : i + MAX_FRAME_BYTES])
-                elif msg.type == aiohttp.WSMsgType.TEXT and msg.data == "stop":
-                    break
+            if video_id:
+                await _stream_youtube(client, aai, video_id, outbox)
+            else:
+                async for msg in client:
+                    if aai.closed:
+                        break
+                    if msg.type == aiohttp.WSMsgType.BINARY:
+                        data = msg.data
+                        for i in range(0, len(data), MAX_FRAME_BYTES):
+                            await aai.send_bytes(data[i : i + MAX_FRAME_BYTES])
+                    elif msg.type == aiohttp.WSMsgType.TEXT and msg.data == "stop":
+                        break
             if not aai.closed:
                 await aai.send_str(json.dumps({"type": "Terminate"}))
             await asyncio.wait_for(reader, timeout=5)

@@ -1,10 +1,20 @@
-// BLINK website: capture a tab (getDisplayMedia) or the microphone, stream
-// 16 kHz PCM to the server, and render captions, verdicts and latency meters.
+// blink website: capture a video/audio file, a browser tab (getDisplayMedia) or
+// the microphone, stream 16 kHz PCM to the server, and render captions,
+// verdicts and latency meters. The 3D eye (scene.js) reacts to all of it.
 import { render, clearFeed } from "/ui.js";
 
 const $ = (id) => document.getElementById(id);
-let ctx, stream, ws, worklet, source;
+let ctx, stream, ws, worklet, source, analyser, levelTimer;
 let speaking = false;
+let pendingChecks = 0;
+let objectUrl = null;
+
+const noop = () => {};
+let eye = { setListening: noop, setChecking: noop, setLevel: noop, verdict: noop, poke: noop };
+import("/scene.js")
+  .then((m) => { eye = m.createEye($("scene"), $("eye-slot"), $("feed")); })
+  .catch((err) => console.warn("3D eye unavailable:", err));
+$("eye-slot").onclick = () => eye.poke();
 
 const store = {
   get(key, fallback) {
@@ -21,8 +31,63 @@ $("speak").onchange = (e) => store.set("blink.speak", e.target.value);
 $("rate").onchange = (e) => store.set("blink.rate", e.target.value);
 
 const health = await fetch("/health").then((r) => r.json()).catch(() => ({}));
-if (health.access_code_required) $("code-row").hidden = false;
-$("code").value = store.get("blink.code", "");
+if (health.access_code_required) {
+  $("code-row").hidden = false;
+  $("code").value = store.get("blink.code", "");
+}
+
+function chosenSource() {
+  return new FormData($("start-form")).get("source");
+}
+function syncSourceUI() {
+  $("file-row").hidden = chosenSource() !== "file";
+  $("url-row").hidden = chosenSource() !== "youtube";
+}
+
+// YouTube: the server fetches the audio itself (no screen sharing). The embed
+// here reports play/pause/seek so the server hears what the viewer watches.
+let ytPlayer = null;
+let ytApi = null;
+function loadYouTube() {
+  ytApi ??= new Promise((resolve, reject) => {
+    window.onYouTubeIframeAPIReady = () => resolve(window.YT);
+    const s = document.createElement("script");
+    s.src = "https://www.youtube.com/iframe_api";
+    s.onerror = () => { ytApi = null; reject(new Error("Couldn't load the YouTube player.")); };
+    document.head.append(s);
+  });
+  return ytApi;
+}
+
+async function showVideo(videoId) {
+  const YT = await loadYouTube();
+  if (ytPlayer) ytPlayer.destroy();
+  $("yt-wrap").hidden = false;
+  const send = (msg) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(msg); };
+  ytPlayer = new YT.Player("yt", {
+    videoId,
+    playerVars: { playsinline: 1, rel: 0, autoplay: 1 },
+    events: {
+      onReady: (e) => e.target.playVideo(),
+      onStateChange: (e) => {
+        if (e.data === YT.PlayerState.PLAYING) send(`play:${e.target.getCurrentTime().toFixed(2)}`);
+        else if (e.data === YT.PlayerState.PAUSED || e.data === YT.PlayerState.BUFFERING) send("pause");
+      },
+    },
+  });
+}
+$("start-form").addEventListener("change", syncSourceUI);
+syncSourceUI();
+
+const tally = { true: 0, false: 0, misleading: 0, unverified: 0 };
+function count(verdict) {
+  if (!(verdict in tally)) return;
+  tally[verdict] += 1;
+  $(`n-${verdict}`).textContent = tally[verdict];
+}
+function resetTally() {
+  for (const k of Object.keys(tally)) { tally[k] = 0; $(`n-${k}`).textContent = "0"; }
+}
 
 async function capture(kind) {
   if (kind === "mic") {
@@ -31,7 +96,7 @@ async function capture(kind) {
     });
   }
   if (!navigator.mediaDevices.getDisplayMedia) {
-    throw new Error("This browser can't share tab audio. Use Chrome or Edge, or pick Microphone.");
+    throw new Error("This browser can't share tab audio. Use Chrome or Edge, or upload a file instead.");
   }
   const media = await navigator.mediaDevices.getDisplayMedia({
     video: true, // required by browsers; we drop it right away
@@ -48,42 +113,128 @@ async function capture(kind) {
   return media;
 }
 
+// An uploaded file plays in the page; its audio goes both to the speakers
+// and to the fact-checker, exactly like a shared tab.
+function fileSource(file) {
+  const player = $("player");
+  if (objectUrl) URL.revokeObjectURL(objectUrl);
+  objectUrl = URL.createObjectURL(file);
+  player.src = objectUrl;
+  player.hidden = false;
+  const node = ctx.createMediaElementSource(player);
+  node.connect(ctx.destination);
+  player.onended = () => {
+    render({ type: "status", status: "connected" });
+    $("status").textContent = "Video finished. Wrapping up the last checks…";
+    stop();
+  };
+  return node;
+}
+
 function speak(event) {
   const mode = $("speak").value;
   const flagged = event.verdict === "false" || event.verdict === "misleading";
   if (mode === "off" || (mode === "false" && !flagged) || !("speechSynthesis" in window)) return;
   const u = new SpeechSynthesisUtterance(event.speak);
   u.rate = Number($("rate").value);
-  // In mic mode the mic would hear BLINK talking; mute the stream meanwhile.
+  // In mic mode the mic would hear blink talking; mute the stream meanwhile.
   u.onstart = () => { speaking = true; };
   u.onend = u.onerror = () => { speaking = speechSynthesis.speaking; };
   speechSynthesis.speak(u);
 }
 
+function onEvent(event) {
+  render(event);
+  if (event.type === "status" && event.status === "listening") eye.setListening(true);
+  if (event.type === "media") {
+    $("status").textContent = `Watching “${event.title}”`;
+    showVideo(event.video_id).catch((err) => render({ type: "error", message: err.message }));
+  }
+  if (event.type === "ended") {
+    $("status").textContent = "Video finished. Wrapping up the last checks…";
+  }
+  if (event.type === "checking") {
+    pendingChecks += event.claims.length;
+    eye.setChecking(true);
+  }
+  if (event.type === "verdict") {
+    pendingChecks = Math.max(0, pendingChecks - 1);
+    eye.setChecking(pendingChecks > 0);
+    eye.verdict(event.verdict);
+    count(event.verdict);
+    speak(event);
+  }
+  if (event.type === "closed") {
+    pendingChecks = 0;
+    eye.setChecking(false);
+    eye.setListening(false);
+    document.body.classList.remove("live");
+  }
+}
+
+function connect(params) {
+  const code = $("code").value.trim();
+  if (code) { store.set("blink.code", code); params.set("code", code); }
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const qs = params.toString() ? `?${params}` : "";
+  ws = new WebSocket(`${proto}://${location.host}/stream${qs}`);
+  ws.binaryType = "arraybuffer";
+  ws.onmessage = (e) => onEvent(JSON.parse(e.data));
+  ws.onerror = () => render({ type: "error", message: "Lost the connection to the blink server. Press start to try again." });
+  ws.onclose = () => { onEvent({ type: "closed" }); stop(); };
+  document.body.classList.add("live");
+  $("start-form").hidden = true;
+  $("stop").hidden = false;
+}
+
 async function start(kind) {
+  const file = $("file").files[0];
+  const link = $("yt-url").value.trim();
+  if (kind === "file" && !file) throw new Error("Choose a video or audio file first.");
+  if (kind === "youtube" && !link) throw new Error("Paste a YouTube link first.");
   clearFeed();
-  stream = await capture(kind);
+  resetTally();
+  pendingChecks = 0;
+
+  if (kind === "youtube") {
+    $("player").hidden = true;
+    $("status").textContent = "Loading the video…";
+    connect(new URLSearchParams({ youtube: link }));
+    return;
+  }
+  $("yt-wrap").hidden = true;
+  if (ytPlayer) { ytPlayer.destroy(); ytPlayer = null; }
+
   ctx = new AudioContext({ latencyHint: "interactive" });
   await ctx.resume(); // some browsers start contexts suspended
   await ctx.audioWorklet.addModule("/pcm-worklet.js");
-  source = ctx.createMediaStreamSource(stream);
+  if (kind === "file") {
+    source = fileSource(file);
+  } else {
+    stream = await capture(kind);
+    source = ctx.createMediaStreamSource(stream);
+    stream.getAudioTracks()[0].onended = () => stop(); // "Stop sharing" clicked
+  }
   worklet = new AudioWorkletNode(ctx, "pcm16-downsampler");
-  source.connect(worklet); // not to ctx.destination: no echo of the tab/mic
+  source.connect(worklet); // tab/mic are not sent to the speakers: no echo
 
-  const code = $("code").value.trim();
-  if (code) store.set("blink.code", code);
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const qs = code ? `?code=${encodeURIComponent(code)}` : "";
-  ws = new WebSocket(`${proto}://${location.host}/stream${qs}`);
-  ws.binaryType = "arraybuffer";
-  ws.onopen = () => render({ type: "status", status: "connected" });
-  ws.onmessage = (e) => {
-    const event = JSON.parse(e.data);
-    render(event);
-    if (event.type === "verdict") speak(event);
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = 512;
+  source.connect(analyser);
+  const buf = new Float32Array(analyser.fftSize);
+  levelTimer = setInterval(() => {
+    if (!analyser) return;
+    analyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (const v of buf) sum += v * v;
+    eye.setLevel(Math.sqrt(sum / buf.length));
+  }, 50);
+
+  connect(new URLSearchParams());
+  ws.onopen = () => {
+    onEvent({ type: "status", status: "connected" });
+    if (kind === "file") $("player").play().catch(() => {});
   };
-  ws.onerror = () => render({ type: "error", message: "Lost the connection to the BLINK server." });
-  ws.onclose = () => { render({ type: "closed" }); stop(); };
 
   const silence = new ArrayBuffer(1600);
   worklet.port.onmessage = (e) => {
@@ -91,9 +242,6 @@ async function start(kind) {
       ws.send(kind === "mic" && speaking ? silence : e.data);
     }
   };
-  stream.getAudioTracks()[0].onended = () => stop(); // "Stop sharing" clicked
-  $("start-form").hidden = true;
-  $("stop").hidden = false;
 }
 
 async function stop() {
@@ -101,17 +249,22 @@ async function stop() {
     if (ws.readyState === WebSocket.OPEN) ws.send("stop");
     ws = null;
   }
+  clearInterval(levelTimer);
   if (stream) stream.getTracks().forEach((t) => t.stop());
+  const player = $("player");
+  if (!player.paused) player.pause();
+  if (ytPlayer?.pauseVideo) ytPlayer.pauseVideo();
   if (ctx) await ctx.close().catch(() => {});
-  ctx = stream = worklet = source = null;
-  if ("speechSynthesis" in window) speechSynthesis.cancel();
+  ctx = stream = worklet = source = analyser = null;
+  eye.setListening(false);
+  if ("speechSynthesis" in window && $("speak").value === "off") speechSynthesis.cancel();
   $("start-form").hidden = false;
   $("stop").hidden = true;
 }
 
 $("start-form").onsubmit = async (e) => {
   e.preventDefault();
-  const kind = new FormData(e.target).get("source");
+  const kind = chosenSource();
   $("start").disabled = true;
   try {
     await start(kind);

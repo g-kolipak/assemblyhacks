@@ -3,54 +3,104 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BLINK</title>
-  <meta name="description" content="BLINK checks your facts faster than you blink: live fact-checking for YouTube, podcasts and anything you can hear." />
-  <link rel="stylesheet" href="/sidepanel.css" />
+  <title>blink</title>
+  <meta name="description" content="blink checks your facts faster than you blink: live fact-checking for YouTube, podcasts, videos and anything you can hear." />
+  <meta property="og:title" content="blink" />
+  <meta property="og:description" content="Live fact-checking for anything you can hear." />
+  <meta property="og:image" content="/img/og.png" />
+  <meta name="theme-color" content="#000000" />
+  <link rel="icon" type="image/png" href="/img/favicon.png" />
+  <link rel="apple-touch-icon" href="/img/icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;700;800&display=swap" />
   <link rel="stylesheet" href="/site.css" />
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
 </head>
 <body>
-  <main>
-    <header>
-      <div>
-        <h1>BLINK</h1>
-        <p class="muted tagline">Checks your facts faster than you blink</p>
-        <p id="status" class="muted">Pick a source and press Start.</p>
-      </div>
-      <button id="stop" hidden>Stop</button>
-    </header>
+  <canvas id="scene" aria-hidden="true"></canvas>
+  <div class="app">
+    <div class="stage">
+      <div id="eye-slot" class="eye-slot" title="Poke me"></div>
+      <h1 class="wordmark"><img src="/img/wordmark.png" alt="blink" width="252" height="96" /></h1>
+      <p class="tagline">Checks your facts faster than you blink.</p>
+    </div>
 
-    <form id="start-form" class="start">
-      <fieldset>
-        <legend>Listen to</legend>
-        <label class="choice"><input type="radio" name="source" value="tab" checked />
-          <span><strong>A browser tab</strong> (YouTube, podcasts…). Chrome or Edge: pick the tab and tick <em>Also share tab audio</em>.</span></label>
-        <label class="choice"><input type="radio" name="source" value="mic" />
-          <span><strong>Microphone</strong>: you talking, or audio playing in the room. Works in any browser.</span></label>
-      </fieldset>
-      <label id="code-row" hidden>Access code
-        <input id="code" type="password" autocomplete="off" />
-      </label>
-      <button id="start" class="primary" type="submit">Start fact-checking</button>
-    </form>
+    <main class="panel">
+      <header class="bar">
+        <p id="status" class="status">Pick something to listen to, then start.</p>
+        <button id="stop" class="stop" hidden>Stop</button>
+      </header>
 
-    <section id="caption" class="caption muted">Live captions appear here.</section>
-    <section id="feed" aria-live="polite"></section>
+      <form id="start-form" class="start">
+        <fieldset class="sources">
+          <legend>What should blink listen to?</legend>
+          <label class="source">
+            <input type="radio" name="source" value="youtube" checked />
+            <span class="source-name">A YouTube link</span>
+            <span class="source-hint">Paste it below. The video plays here and blink checks it as you watch.</span>
+          </label>
+          <label class="source">
+            <input type="radio" name="source" value="file" />
+            <span class="source-name">A video or audio file</span>
+            <span class="source-hint">Upload it and blink checks every claim while it plays.</span>
+          </label>
+          <label class="source">
+            <input type="radio" name="source" value="tab" />
+            <span class="source-name">A browser tab</span>
+            <span class="source-hint">YouTube, podcasts, livestreams. In Chrome or Edge, pick the tab and turn on “Also share tab audio”.</span>
+          </label>
+          <label class="source">
+            <input type="radio" name="source" value="mic" />
+            <span class="source-name">My microphone</span>
+            <span class="source-hint">You talking, or audio playing in the room.</span>
+          </label>
+        </fieldset>
+        <label id="url-row" class="file-row">
+          <span>YouTube link</span>
+          <input id="yt-url" type="url" inputmode="url" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off" />
+        </label>
+        <label id="file-row" class="file-row" hidden>
+          <span>Choose a file</span>
+          <input id="file" type="file" accept="video/*,audio/*" />
+        </label>
+        <label id="code-row" class="code-row" hidden>Access code
+          <input id="code" type="password" autocomplete="off" />
+        </label>
+        <button id="start" class="go" type="submit">Start fact-checking</button>
+      </form>
 
-    <details>
-      <summary>Settings</summary>
-      <label>Say out loud
-        <select id="speak">
-          <option value="all">Every verdict</option>
-          <option value="false">Only false or misleading (with the right answer)</option>
-          <option value="off">Nothing (show only)</option>
-        </select>
-      </label>
-      <label>Voice speed
-        <input id="rate" type="range" min="0.8" max="1.8" step="0.05" value="1.15" />
-      </label>
-    </details>
-    <footer class="muted">Audio is transcribed by AssemblyAI; claims are checked on the live web with Parallel.</footer>
-  </main>
+      <video id="player" class="player" controls playsinline hidden></video>
+      <div id="yt-wrap" class="yt" hidden><div id="yt"></div></div>
+
+      <ul class="tally" aria-label="Verdicts so far">
+        <li class="t-true"><b id="n-true">0</b> true</li>
+        <li class="t-false"><b id="n-false">0</b> false</li>
+        <li class="t-misleading"><b id="n-misleading">0</b> misleading</li>
+        <li class="t-unverified"><b id="n-unverified">0</b> unverified</li>
+      </ul>
+
+      <section id="caption" class="caption muted">What blink hears shows up here.</section>
+      <section id="feed" aria-live="polite"></section>
+
+      <details class="settings">
+        <summary>Voice settings</summary>
+        <label>Say out loud
+          <select id="speak">
+            <option value="all">Every verdict</option>
+            <option value="false">Only false or misleading (with the right answer)</option>
+            <option value="off">Nothing (show only)</option>
+          </select>
+        </label>
+        <label>Voice speed
+          <input id="rate" type="range" min="0.8" max="1.8" step="0.05" value="1.15" />
+        </label>
+      </details>
+      <footer>Speech-to-text by AssemblyAI. Claims are checked on the live web with Parallel.</footer>
+    </main>
+  </div>
   <script src="/app.js" type="module"></script>
 </body>
 </html>
