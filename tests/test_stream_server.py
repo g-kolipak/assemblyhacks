@@ -17,7 +17,7 @@ def turn(order, words, *, final=True, end=False, transcript=None):
 
 
 def test_end_of_turn_emits_transcript_once():
-    seg = TurnSegmenter(flush_words=50)
+    seg = TurnSegmenter()
     assert seg.feed(turn(0, "Everest is six thousand", final=False)) == []
     text = "Everest is six thousand metres tall."
     assert seg.feed(turn(0, text, end=True, transcript=text)) == [text]
@@ -26,7 +26,7 @@ def test_end_of_turn_emits_transcript_once():
 
 
 def test_long_monologue_flushes_at_sentence_boundary():
-    seg = TurnSegmenter(flush_words=10)
+    seg = TurnSegmenter()
     first = "The Moon is about three hundred eighty four thousand km away."
     talk = first + " And the Sun is"
     assert seg.feed(turn(1, talk)) == [first]
@@ -37,9 +37,15 @@ def test_long_monologue_flushes_at_sentence_boundary():
     ]
 
 
-def test_non_final_words_are_not_flushed():
-    seg = TurnSegmenter(flush_words=5)
-    assert seg.feed(turn(2, "one two three four five six. seven", final=False)) == []
+def test_partial_sentence_flushes_once_speaker_moves_on():
+    seg = TurnSegmenter()
+    # Sentence end is the last (revisable) word: wait.
+    assert seg.feed(turn(2, "The Great Wall is visible from space.", final=False)) == []
+    # More words follow it, so the sentence is done; check it now.
+    msg = turn(2, "The Great Wall is visible from space. Anyway, the", final=False)
+    assert seg.feed(msg) == ["The Great Wall is visible from space."]
+    # Too-short sentences wait to be grouped with the next one.
+    assert seg.feed(turn(3, "So yes. And then", final=False)) == []
 
 
 def test_origin_check(monkeypatch):
@@ -96,7 +102,7 @@ async def test_stream_end_to_end_with_fakes(monkeypatch):
         async def decide_raw(self, state, questions):
             return {
                 "answers": {k: {"type": "noul", "noul": 0.03} for k in questions},
-                "citations": [{"url": "https://w.org", "title": "Wiki"}],
+                "citations": [{"url": "https://w.org", "title": "Mount Everest"}],
             }
 
         async def aclose(self):

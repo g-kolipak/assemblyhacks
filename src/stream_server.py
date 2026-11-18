@@ -43,10 +43,10 @@ STT_MODEL = os.environ.get("ASSEMBLYAI_STT_MODEL", "universal-3-6-pro")
 AAI_URL = "wss://streaming.assemblyai.com/v3/ws"
 SAMPLE_RATE = 16000
 
-# Flush a still-open turn once this many final words are waiting and a
-# sentence has ended. Lower = faster verdicts, less context per check.
-FLUSH_WORDS = int(os.environ.get("FACTCHECK_FLUSH_WORDS", "18"))
-MIN_SENTENCE_WORDS = 5
+# A sentence is sent for checking once it has at least this many words.
+MIN_SENTENCE_WORDS = int(os.environ.get("FACTCHECK_MIN_WORDS", "5"))
+# AssemblyAI accepts 20-1000 ms per audio message.
+MAX_FRAME_BYTES = SAMPLE_RATE * 2  # one second of 16-bit mono
 SENTENCE_END = re.compile(r"[.?!][\"')\]]*$")
 
 
@@ -60,6 +60,9 @@ def assemblyai_url() -> str:
         "min_turn_silence": os.environ.get("AAI_MIN_TURN_SILENCE", "160"),
         "max_turn_silence": os.environ.get("AAI_MAX_TURN_SILENCE", "1000"),
         "speaker_labels": "true",
+        # Extra partials every ~3 s during long monologues, so sentences can
+        # be checked before the speaker pauses.
+        "continuous_partials": "true",
     }
     return f"{AAI_URL}?{urlencode(params)}"
 
@@ -67,12 +70,14 @@ def assemblyai_url() -> str:
 class TurnSegmenter:
     """Turn AssemblyAI `Turn` messages into sentences ready to fact-check.
 
-    Words in a turn are cumulative. Final words are emitted at the end of a
-    turn, or earlier at a sentence boundary once `flush_words` have built up.
+    Words in a turn are cumulative. Universal-3 Pro only marks words final at
+    the end of a turn, but its partials are punctuated, so a sentence that is
+    already followed by more words is finished and can be checked right away,
+    mid-monologue. The rest of the turn is emitted at end of turn.
     """
 
-    def __init__(self, flush_words: int = FLUSH_WORDS) -> None:
-        self.flush_words = flush_words
+    def __init__(self, min_words: int = MIN_SENTENCE_WORDS) -> None:
+        self.min_words = min_words
         self._turn: object = None
         self._done = 0
         self._closed: set[object] = set()
@@ -94,20 +99,17 @@ class TurnSegmenter:
             self._done = len(words)
             return [text.strip()] if text.strip() else []
 
-        final = []
-        for w in words[self._done :]:
-            if not w.get("word_is_final"):
-                break
-            final.append(w["text"])
-        if len(final) < self.flush_words:
-            return []
+        pending = [w["text"] for w in words[self._done :]]
+        # The last word may still be revised unless it is final.
+        settled = len(pending) - (0 if words and words[-1].get("word_is_final") else 1)
         cut = max(
-            (i for i, t in enumerate(final) if SENTENCE_END.search(t)), default=-1
+            (i for i, t in enumerate(pending[:settled]) if SENTENCE_END.search(t)),
+            default=-1,
         )
-        if cut + 1 < MIN_SENTENCE_WORDS:
+        if cut + 1 < self.min_words:
             return []
         self._done += cut + 1
-        return [" ".join(final[: cut + 1])]
+        return [" ".join(pending[: cut + 1])]
 
 
 def result_event(result: CheckResult, speaker: str | None, heard_at: float) -> dict:
@@ -201,11 +203,16 @@ async def stream_handler(request: web.Request) -> web.WebSocketResponse:
             )
             reader = asyncio.create_task(from_assemblyai(aai))
             async for msg in client:
+                if aai.closed:
+                    break
                 if msg.type == aiohttp.WSMsgType.BINARY:
-                    await aai.send_bytes(msg.data)
+                    data = msg.data
+                    for i in range(0, len(data), MAX_FRAME_BYTES):
+                        await aai.send_bytes(data[i : i + MAX_FRAME_BYTES])
                 elif msg.type == aiohttp.WSMsgType.TEXT and msg.data == "stop":
                     break
-            await aai.send_str(json.dumps({"type": "Terminate"}))
+            if not aai.closed:
+                await aai.send_str(json.dumps({"type": "Terminate"}))
             await asyncio.wait_for(reader, timeout=5)
     except aiohttp.WSServerHandshakeError as e:
         logger.error("AssemblyAI rejected the connection: %s", e)

@@ -50,7 +50,7 @@ Try a library compatibility assistant. Set `AGENT_GREETING="Which library are yo
 
 1. **AssemblyAI** streaming speech-to-text transcribes the audio and detects when each utterance ends.
 2. One LLM call on the AssemblyAI gateway pulls out the checkable claims.
-3. **One Parallel Decisions call** checks every claim in the utterance together. Decisions is Parallel's web-grounded System One model (`model: "fast"`, usually under a second), and it returns the probability that each claim is true, with citations.
+3. **One Parallel Decisions call** checks every claim in the utterance together. Decisions is Parallel's web-grounded System One model (`mode: "fast"`, usually under a second), and it returns the probability that each claim is true, with citations.
 4. For a claim that is false or misleading, one quick LLM call writes **the right answer** from those citations.
 5. The verdict is spoken by AssemblyAI text-to-speech, for example:
    - *"That's false. Actually, Mount Everest is about 8,849 metres tall. Source: Wikipedia."*
@@ -68,7 +68,7 @@ Try saying: "The Great Wall of China is visible from the Moon, and Mount Everest
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `FACTCHECK_SPEAK` | `all` | `all` speaks every verdict, `false` speaks only corrections, `off` only logs |
-| `PARALLEL_DECISIONS_MODEL` | `fast` | Parallel Decisions model |
+| `PARALLEL_DECISIONS_MODE` | `fast` | Parallel Decisions mode |
 | `LLM_MODEL` | `gemma-4-31b` | AssemblyAI gateway model for claim extraction and corrections |
 
 A probability of 0.75 or higher counts as true, 0.25 or lower as false, and anything between 0.25 and 0.45 as misleading. Everything else is reported as "couldn't verify". To change these cutoffs, edit `Thresholds` in `src/fact_check.py`.
@@ -100,14 +100,14 @@ uv run python src/stream_server.py      # listens on ws://127.0.0.1:8765/stream
 ### How it stays fast
 
 - Audio streams continuously in 50 ms frames. Nothing waits for the video to end.
-- Sentences are cut as soon as AssemblyAI marks their words final, even mid-monologue (`FACTCHECK_FLUSH_WORDS`, default 18). Podcasters rarely pause, so the backend doesn't wait for one.
-- Each sentence makes **one** Parallel Decisions call (`model: "fast"`, usually under a second), with every claim in that sentence batched together. Sentences are checked concurrently, so a slow check never holds up the next one.
+- A sentence is sent for checking as soon as the speaker starts the next one. AssemblyAI's punctuated partial transcripts (with `continuous_partials`, about every 3 s) show where sentences end, so the backend doesn't wait for a pause, which podcasters rarely take.
+- Each sentence makes **one** Parallel Decisions call (`mode: "fast"`, usually under a second), with every claim in that sentence batched together. Sentences are checked concurrently, so a slow check never holds up the next one.
 - True verdicts are sent the moment Decisions answers. Only false claims pay for the extra correction step.
 - The spoken verdict uses Chrome's built-in text-to-speech, so there's no extra network hop.
 
 In practice, a verdict arrives about one to two seconds after a sentence ends. The latency is shown on every card.
 
-**Settings** (in the side panel): what to say out loud (every verdict, only false ones, or nothing), voice speed, and the server URL. Backend settings are `AAI_MIN_TURN_SILENCE`, `AAI_MAX_TURN_SILENCE`, `FACTCHECK_FLUSH_WORDS` and `FACTCHECK_PORT`.
+**Settings** (in the side panel): what to say out loud (every verdict, only false ones, or nothing), voice speed, and the server URL. Backend settings are `AAI_MIN_TURN_SILENCE`, `AAI_MAX_TURN_SILENCE`, `FACTCHECK_MIN_WORDS` and `FACTCHECK_PORT`.
 
 **Privacy:** tab audio is sent to AssemblyAI to be transcribed, and claims are sent to Parallel and the AssemblyAI LLM gateway. The backend binds to `127.0.0.1` and only accepts connections from Chrome extensions.
 

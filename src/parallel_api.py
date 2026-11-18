@@ -71,14 +71,14 @@ class ParallelAPI:
     ) -> dict:
         """One Decisions call with several questions; returns the JSON body.
 
-        `PARALLEL_DECISIONS_MODEL` picks the model (default "fast", the
+        `PARALLEL_DECISIONS_MODE` picks the mode (default "fast", the
         low-latency System One model, typically well under a second).
         """
         return await self._client.post(
             "/v1/decisions",
             cast_to=object,
             body={
-                "model": os.environ.get("PARALLEL_DECISIONS_MODEL", "fast"),
+                "mode": os.environ.get("PARALLEL_DECISIONS_MODE", "fast"),
                 "state": state,
                 "questions": questions,
             },

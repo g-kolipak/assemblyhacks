@@ -75,20 +75,23 @@ async def test_true_claim_is_confirmed_without_correction_call():
     checker, calls = make_checker(["The Eiffel Tower is in Paris"], [0.98])
     [r] = await checker.process("the Eiffel Tower is in Paris France you know")
     assert r.verdict == "true"
-    assert r.spoken() == "That checks out. Source: Eiffel Tower - Wikipedia."
+    assert r.spoken() == "That checks out. Source: Wikipedia."
     assert calls["correct"] == 0
 
 
 async def test_all_claims_share_one_decisions_call():
-    claims = ["Claim A is so", "Claim B is so", "Claim C is so"]
+    claims = ["Eiffel Tower is tall", "Eiffel Tower is short", "Eiffel Tower is old"]
     checker, calls = make_checker(claims, [0.9, 0.1, None])
     results = await checker.process("three separate factual claims in one sentence")
     assert len(calls["decide"]) == 1
     assert set(calls["decide"][0]) == {"claim_0", "claim_1", "claim_2"}
     assert [r.verdict for r in results] == ["true", "false", "unverified"]
     # With several claims, each spoken verdict names its claim.
-    assert results[0].spoken().startswith("Claim A is so: That checks out.")
-    assert results[2].spoken() == "Claim C is so: I couldn't verify that one."
+    assert (
+        results[0].spoken()
+        == "Eiffel Tower is tall: That checks out. Source: Wikipedia."
+    )
+    assert results[2].spoken() == "Eiffel Tower is old: I couldn't verify that one."
 
 
 async def test_true_verdict_reported_before_slow_correction():
@@ -135,3 +138,20 @@ async def test_fact_check_agent_builds(monkeypatch):
     agent = fact_check_agent.FactCheckAgent()
     assert agent.checker.max_claims == 3
     await agent.parallel.aclose()
+
+
+def test_sources_are_matched_per_claim():
+    from fact_check import rank_citations, source_name
+
+    cites = [
+        {"url": "https://www.britannica.com/everest", "title": "Mount Everest height"},
+        {
+            "url": "https://en.wikipedia.org/wiki/Eiffel",
+            "excerpts": ["Eiffel Tower, Paris"],
+        },
+    ]
+    assert rank_citations("The Eiffel Tower is in Paris", cites)[0] is cites[1]
+    assert rank_citations("Water boils at 100 C", cites) == []
+    assert source_name("https://en.wikipedia.org/x") == "Wikipedia"
+    assert source_name("https://www.britannica.com/x") == "Britannica"
+    assert source_name("https://www.bbc.co.uk/news") == "Bbc"

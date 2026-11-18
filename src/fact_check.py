@@ -107,8 +107,9 @@ Return at most {max_claims} claims. If there are none, return {{"claims":[]}}.""
 CORRECTION_SYSTEM = """\
 A fact checker found this claim to be wrong. Today is {today}. Using ONLY the
 source excerpts provided, state the right answer. Return JSON only:
-{{"correction":"one short sentence with the accurate fact",
-  "source":"publisher name of the excerpt you used","url":"its url"}}
+{{"correction":"the accurate fact in under 15 words, starting lowercase unless it
+  begins with a name",
+  "source":"publisher name of the excerpt you used","url":"its exact url"}}
 Write for speech: no markdown, no URLs in the sentence, numbers a voice can read,
 e.g. "the Eiffel Tower is about 330 metres tall". If the excerpts do not state
 the right answer, return {{"correction":"","source":"","url":""}}."""
@@ -137,6 +138,40 @@ def _normalize(text: str) -> str:
 def _host(url: str) -> str:
     match = re.match(r"https?://(?:www\.)?([^/]+)", url)
     return match.group(1) if match else url
+
+
+def source_name(url: str) -> str:
+    """Speakable publisher name: en.wikipedia.org -> Wikipedia."""
+    parts = _host(url).split(".")
+    if len(parts) >= 3 and len(parts[-2]) <= 3:  # bbc.co.uk, abc.net.au
+        return parts[-3].capitalize()
+    return (parts[-2] if len(parts) >= 2 else parts[0]).capitalize()
+
+
+_STOPWORDS = set(
+    "a an the is are was were be been of in on at to for and or that this it its "
+    "about by with as from has have had than".split()
+)
+
+
+def _terms(text: str) -> set[str]:
+    return {w for w in _normalize(text).split() if w not in _STOPWORDS and len(w) > 2}
+
+
+def rank_citations(claim: str, citations: list[dict]) -> list[dict]:
+    """Citations most relevant to one claim first; drop ones sharing no terms.
+
+    Decisions returns one citation list for the whole call, so with several
+    claims batched together each claim must pick its own sources.
+    """
+    terms = _terms(claim)
+    scored = []
+    for i, c in enumerate(citations):
+        text = f"{c.get('title') or ''} {' '.join(c.get('excerpts') or [])}"
+        overlap = len(terms & _terms(text))
+        if overlap:
+            scored.append((-overlap, i, c))
+    return [c for _, _, c in sorted(scored, key=lambda t: t[:2])]
 
 
 def format_citations(citations: list[dict], max_sources: int = 4) -> str:
@@ -226,7 +261,6 @@ class FactChecker:
         t_decide = time.perf_counter() - t0
         answers = response.get("answers", {})
         citations = response.get("citations", [])
-        first = citations[0] if citations else {}
 
         async def finish(i: int, claim: str) -> CheckResult:
             answer = answers.get(f"claim_{i}", {"type": "refusal"})
@@ -240,15 +274,18 @@ class FactChecker:
                 p = float(answer["noul"])
                 result.probability = p
                 result.verdict = self.thresholds.verdict(p)
-            if result.verdict == "true" and first:
-                result.source = first.get("title") or _host(first.get("url", ""))
-                result.url = first.get("url", "")
+            relevant = rank_citations(claim, citations)
+            if result.verdict == "true" and relevant:
+                result.url = relevant[0].get("url", "")
+                result.source = source_name(result.url)
             if result.needs_flag:
                 t1 = time.perf_counter()
-                fix = await self._correct(claim, citations)
+                fix = await self._correct(claim, relevant)
                 result.correction = fix.get("correction", "")
-                result.source = fix.get("source", "")
                 result.url = fix.get("url", "")
+                result.source = (
+                    source_name(result.url) if result.url else fix.get("source", "")
+                )
                 result.timings["correction"] = time.perf_counter() - t1
             if on_result is not None:
                 maybe = on_result(result)
