@@ -44,6 +44,31 @@ Try a library compatibility assistant. Set `AGENT_GREETING="Which library are yo
 
 [Setup help](docs/advanced.md#troubleshooting) · [Browser and deployment options](docs/advanced.md#browser-or-room)
 
+## Live fact checker
+
+`src/fact_check_agent.py` listens to streaming audio and corrects false claims as they are spoken. It works on you talking, a meeting, or a podcast playing near the mic.
+
+1. AssemblyAI streaming speech-to-text transcribes the audio and detects when each utterance ends.
+2. One LLM call on the AssemblyAI gateway pulls out checkable claims and search keywords.
+3. Every claim is checked **at the same time** with Parallel Search in `turbo` mode, and then one LLM call gives a verdict based on the evidence.
+4. When a claim is false or misleading, the agent says so out loud **and gives the right answer**, for example: "That's false. Actually, the Eiffel Tower is about 330 metres tall. Source: Wikipedia." Every verdict is printed with its timings.
+
+Listening never pauses during checks, and each verdict is reported as soon as it's ready.
+
+```sh
+# Needs both ASSEMBLYAI_API_KEY and PARALLEL_API_KEY in .env.local
+uv run python src/fact_check_agent.py console
+```
+
+Try saying: "The Great Wall of China is visible from the Moon, and Mount Everest is about six thousand metres tall."
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `FACTCHECK_SPEAK` | `1` | Set to `0` to only log verdicts without speaking |
+| `PARALLEL_SEARCH_MODE` | `turbo` | `fast` / `basic` / `advanced` trade speed for depth |
+| `PARALLEL_MAX_CHARS` | `3000` | Evidence size; smaller makes the verdict LLM faster |
+| `LLM_MODEL` | `gemma-4-31b` | Any AssemblyAI gateway model |
+
 ## Credits
 
 This project is based on [hsingh-aai/assemblyai-parallel-voice-agent](https://github.com/hsingh-aai/assemblyai-parallel-voice-agent). The upstream code has no license file yet, and we have asked its author to add one. Until that happens, the upstream portions remain the original author's work.
