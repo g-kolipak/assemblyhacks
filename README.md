@@ -46,14 +46,17 @@ Try a library compatibility assistant. Set `AGENT_GREETING="Which library are yo
 
 ## Live fact checker
 
-`src/fact_check_agent.py` listens to streaming audio and corrects false claims as they are spoken. It works on you talking, a meeting, or a podcast playing near the mic.
+`src/fact_check_agent.py` listens to streaming audio and **tells you out loud** whether each claim it hears is true. When a claim is false, it says the right answer. It works on you talking, a meeting, or a podcast playing near the mic.
 
-1. AssemblyAI streaming speech-to-text transcribes the audio and detects when each utterance ends.
-2. One LLM call on the AssemblyAI gateway pulls out checkable claims and search keywords.
-3. Every claim is checked **at the same time** with Parallel Search in `turbo` mode, and then one LLM call gives a verdict based on the evidence.
-4. When a claim is false or misleading, the agent says so out loud **and gives the right answer**, for example: "That's false. Actually, the Eiffel Tower is about 330 metres tall. Source: Wikipedia." Every verdict is printed with its timings.
+1. **AssemblyAI** streaming speech-to-text transcribes the audio and detects when each utterance ends.
+2. One LLM call on the AssemblyAI gateway pulls out the checkable claims.
+3. **One Parallel Decisions call** checks every claim in the utterance together. Decisions is Parallel's web-grounded System One model (`model: "fast"`, usually under a second), and it returns the probability that each claim is true, with citations.
+4. For a claim that is false or misleading, one quick LLM call writes **the right answer** from those citations.
+5. The verdict is spoken by AssemblyAI text-to-speech, for example:
+   - *"That's false. Actually, Mount Everest is about 8,849 metres tall. Source: Wikipedia."*
+   - *"That checks out. Source: NASA."*
 
-Listening never pauses during checks, and each verdict is reported as soon as it's ready.
+Listening never pauses during checks. True claims are announced as soon as Decisions answers, without waiting for any corrections. Every verdict is also printed with its probability and timings.
 
 ```sh
 # Needs both ASSEMBLYAI_API_KEY and PARALLEL_API_KEY in .env.local
@@ -64,10 +67,11 @@ Try saying: "The Great Wall of China is visible from the Moon, and Mount Everest
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `FACTCHECK_SPEAK` | `1` | Set to `0` to only log verdicts without speaking |
-| `PARALLEL_SEARCH_MODE` | `turbo` | `fast` / `basic` / `advanced` trade speed for depth |
-| `PARALLEL_MAX_CHARS` | `3000` | Evidence size; smaller makes the verdict LLM faster |
-| `LLM_MODEL` | `gemma-4-31b` | Any AssemblyAI gateway model |
+| `FACTCHECK_SPEAK` | `all` | `all` speaks every verdict, `false` speaks only corrections, `off` only logs |
+| `PARALLEL_DECISIONS_MODEL` | `fast` | Parallel Decisions model |
+| `LLM_MODEL` | `gemma-4-31b` | AssemblyAI gateway model for claim extraction and corrections |
+
+A probability of 0.75 or higher counts as true, 0.25 or lower as false, and anything between 0.25 and 0.45 as misleading. Everything else is reported as "couldn't verify". To change these cutoffs, edit `Thresholds` in `src/fact_check.py`.
 
 ## Credits
 

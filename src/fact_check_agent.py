@@ -2,8 +2,9 @@
 
 AssemblyAI streams speech-to-text and decides when each utterance ends. Every
 finished utterance goes through `FactChecker` in the background, so listening
-never pauses while claims are verified with Parallel Search. The agent only
-speaks when a claim is false or misleading; every verdict is logged.
+never pauses while claims are verified with Parallel Decisions, Parallel's
+web-grounded System One model. Every verdict is spoken out loud: false or
+misleading claims come with the right answer.
 
     uv run python src/fact_check_agent.py console
 """
@@ -31,7 +32,7 @@ from livekit.agents import (
 from livekit.plugins import assemblyai, silero
 
 from fact_check import CheckResult, FactChecker, gateway_chat
-from parallel_api import ParallelAPI, ParallelConfig
+from parallel_api import ParallelAPI
 
 load_dotenv(".env.local")
 
@@ -42,26 +43,20 @@ defaults = dotenv_values(Path(__file__).with_name("gateway.env"))
 LLM_MODEL = os.environ.get("LLM_MODEL", defaults["LLM_MODEL"])
 STT_MODEL = os.environ.get("ASSEMBLYAI_STT_MODEL", "universal-3-6-pro")
 TTS_VOICE = os.environ.get("ASSEMBLYAI_TTS_VOICE", "aai-kyla")
-# Set FACTCHECK_SPEAK=0 to only log verdicts (e.g. while monitoring a podcast).
-SPEAK = os.environ.get("FACTCHECK_SPEAK", "1") != "0"
+# What to say out loud: "all" verdicts (default), only "false"/misleading ones
+# with their corrections, or "off" to only log (e.g. while monitoring a podcast).
+SPEAK = os.environ.get("FACTCHECK_SPEAK", "all").lower()
 GREETING = os.environ.get(
     "AGENT_GREETING",
-    "I'm listening. If I hear a false claim, I'll give you the right answer.",
+    "I'm listening. I'll tell you what checks out and correct anything false.",
 )
 
 ICONS = {"true": "✓", "false": "✗", "misleading": "!", "unverified": "?"}
 
 
 def build_checker() -> tuple[FactChecker, ParallelAPI]:
-    parallel = ParallelAPI(
-        # Turbo search with a small excerpt budget keeps the verdict LLM fast.
-        ParallelConfig(
-            search_mode=os.environ.get("PARALLEL_SEARCH_MODE", "turbo"),  # type: ignore[arg-type]
-            max_chars_total=int(os.environ.get("PARALLEL_MAX_CHARS", "3000")),
-            max_results=int(os.environ.get("PARALLEL_MAX_RESULTS", "4")),
-        )
-    )
-    checker = FactChecker(gateway_chat(LLM_MODEL), parallel.search)
+    parallel = ParallelAPI()
+    checker = FactChecker(gateway_chat(LLM_MODEL), parallel.decide_raw)
     return checker, parallel
 
 
@@ -92,18 +87,20 @@ class FactCheckAgent(Agent):
     async def _check(self, text: str, started: float) -> None:
         async def report(result: CheckResult) -> None:
             elapsed = time.perf_counter() - started
+            p = result.probability
             logger.info(
-                "%s %s · %s%s%s · %.1fs (search %.1fs, verdict %.1fs)",
+                "%s %s%s · %s%s%s · %.1fs (decisions %.1fs, correction %.1fs)",
                 ICONS[result.verdict],
                 result.verdict.upper(),
+                f" p={p:.2f}" if p is not None else "",
                 result.claim,
                 f" → {result.correction}" if result.correction else "",
                 f" [{result.url}]" if result.url else "",
                 elapsed,
-                result.timings.get("search", 0),
-                result.timings.get("verdict", 0),
+                result.timings.get("decide", 0),
+                result.timings.get("correction", 0),
             )
-            if SPEAK and result.needs_flag:
+            if SPEAK == "all" or (SPEAK == "false" and result.needs_flag):
                 self.session.say(
                     result.spoken(), add_to_chat_ctx=False, allow_interruptions=True
                 )
@@ -121,7 +118,7 @@ server = AgentServer()
 async def entrypoint(ctx: JobContext) -> None:
     if not os.getenv("PARALLEL_API_KEY"):
         raise RuntimeError(
-            "The fact checker calls Parallel Search directly. Set PARALLEL_API_KEY "
+            "The fact checker calls Parallel Decisions directly. Set PARALLEL_API_KEY "
             "in .env.local (https://platform.parallel.ai)."
         )
     session = AgentSession(

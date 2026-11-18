@@ -66,6 +66,24 @@ class ParallelAPI:
             logger.info("Search · no results")
         return _format_results(res.results) if res.results else "No results found."
 
+    async def decide_raw(
+        self, state: dict[str, str], questions: dict[str, dict]
+    ) -> dict:
+        """One Decisions call with several questions; returns the JSON body.
+
+        `PARALLEL_DECISIONS_MODEL` picks the model (default "fast", the
+        low-latency System One model, typically well under a second).
+        """
+        return await self._client.post(
+            "/v1/decisions",
+            cast_to=object,
+            body={
+                "model": os.environ.get("PARALLEL_DECISIONS_MODEL", "fast"),
+                "state": state,
+                "questions": questions,
+            },
+        )
+
     async def decide(self, entity: str, question: str) -> str:
         result = await self._client.post(
             "/v1/decisions",

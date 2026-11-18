@@ -1,92 +1,130 @@
-"""Offline tests for the fact-check pipeline using fake LLM and search."""
+"""Offline tests for the fact-check pipeline using fake LLM and Decisions."""
 
 import asyncio
 import json
 
-from fact_check import Claim, FactChecker, parse_json
+from fact_check import FactChecker, Thresholds, parse_json
+
+CITATIONS = [
+    {
+        "url": "https://en.wikipedia.org/wiki/Eiffel_Tower",
+        "title": "Eiffel Tower - Wikipedia",
+        "excerpts": ["The tower is 330 metres tall."],
+    }
+]
+CORRECTION = json.dumps(
+    {
+        "correction": "the Eiffel Tower is about 330 metres tall",
+        "source": "Wikipedia",
+        "url": "https://en.wikipedia.org/wiki/Eiffel_Tower",
+    }
+)
 
 
-def make_checker(extract_reply, verdict_reply, search_delay=0.0, calls=None):
-    calls = calls if calls is not None else []
+def make_checker(claims, probabilities, *, correction=CORRECTION, decide_delay=0.0):
+    calls = {"decide": [], "correct": 0}
 
     async def chat(system: str, user: str) -> str:
         if "extract" in system:
-            return extract_reply
-        return verdict_reply(user) if callable(verdict_reply) else verdict_reply
+            return claims if isinstance(claims, str) else json.dumps({"claims": claims})
+        calls["correct"] += 1
+        await asyncio.sleep(decide_delay)
+        return correction
 
-    async def search(objective: str, queries: list[str]) -> str:
-        calls.append(queries)
-        await asyncio.sleep(search_delay)
-        return "[1] Example (https://example.com)\nThe Eiffel Tower is 330 m tall."
+    async def decide(state, questions):
+        calls["decide"].append(questions)
+        await asyncio.sleep(decide_delay)
+        answers = {}
+        for i, key in enumerate(questions):
+            p = probabilities[i]
+            answers[key] = (
+                {"type": "refusal"} if p is None else {"type": "noul", "noul": p}
+            )
+        return {"mode": "fast", "answers": answers, "citations": CITATIONS}
 
-    return FactChecker(chat, search), calls
+    return FactChecker(chat, decide), calls
 
 
 def test_parse_json_handles_code_fences():
     assert parse_json('```json\n{"claims": []}\n```') == {"claims": []}
 
 
-async def test_false_claim_is_flagged():
-    extract = json.dumps(
-        {
-            "claims": [
-                {
-                    "claim": "The Eiffel Tower is 500 m tall",
-                    "queries": ["Eiffel Tower height"],
-                }
-            ]
-        }
+def test_thresholds():
+    t = Thresholds()
+    assert [t.verdict(p) for p in (0.9, 0.1, 0.35, 0.6)] == [
+        "true",
+        "false",
+        "misleading",
+        "unverified",
+    ]
+
+
+async def test_false_claim_gets_right_answer_spoken():
+    checker, calls = make_checker(["The Eiffel Tower is 500 metres tall"], [0.02])
+    [r] = await checker.process("I read that the Eiffel Tower is 500 metres tall")
+    assert r.verdict == "false" and r.needs_flag and r.probability == 0.02
+    assert r.spoken() == (
+        "That's false. Actually, the Eiffel Tower is about 330 metres tall. "
+        "Source: Wikipedia."
     )
-    verdict = json.dumps(
-        {
-            "verdict": "false",
-            "correction": "It is about 330 metres tall",
-            "source": "Example",
-            "url": "https://example.com",
-        }
-    )
-    checker, calls = make_checker(extract, verdict)
-    results = await checker.process(
-        "I read that the Eiffel Tower is five hundred metres tall"
-    )
-    assert len(results) == 1
-    r = results[0]
-    assert r.verdict == "false" and r.needs_flag
-    assert "Actually, It is about 330 metres tall." in r.spoken()
-    assert "330" in r.spoken() and "Example" in r.spoken()
-    assert calls == [["Eiffel Tower height"]]
+    q = calls["decide"][0]["claim_0"]
+    assert q["type"] == "noul" and "500 metres" in q["instructions"]
+
+
+async def test_true_claim_is_confirmed_without_correction_call():
+    checker, calls = make_checker(["The Eiffel Tower is in Paris"], [0.98])
+    [r] = await checker.process("the Eiffel Tower is in Paris France you know")
+    assert r.verdict == "true"
+    assert r.spoken() == "That checks out. Source: Eiffel Tower - Wikipedia."
+    assert calls["correct"] == 0
+
+
+async def test_all_claims_share_one_decisions_call():
+    claims = ["Claim A is so", "Claim B is so", "Claim C is so"]
+    checker, calls = make_checker(claims, [0.9, 0.1, None])
+    results = await checker.process("three separate factual claims in one sentence")
+    assert len(calls["decide"]) == 1
+    assert set(calls["decide"][0]) == {"claim_0", "claim_1", "claim_2"}
+    assert [r.verdict for r in results] == ["true", "false", "unverified"]
+    # With several claims, each spoken verdict names its claim.
+    assert results[0].spoken().startswith("Claim A is so: That checks out.")
+    assert results[2].spoken() == "Claim C is so: I couldn't verify that one."
+
+
+async def test_true_verdict_reported_before_slow_correction():
+    checker, _ = make_checker(["A is true", "B is false"], [0.9, 0.1], decide_delay=0.2)
+    order = []
+    await checker.process("two claims in this one sentence here", order.append)
+    assert [r.verdict for r in order] == ["true", "false"]
 
 
 async def test_short_utterances_and_duplicates_skip_work():
-    extract = json.dumps(
-        {"claims": [{"claim": "Water boils at 100 C", "queries": ["boiling point"]}]}
-    )
-    checker, calls = make_checker(extract, '{"verdict":"true"}')
+    checker, calls = make_checker(["Water boils at 100 C"], [0.95])
     assert await checker.process("yeah okay") == []
     await checker.process("water boils at one hundred degrees at sea level")
     await checker.process("again, water boils at one hundred degrees at sea level")
-    assert len(calls) == 1
+    assert len(calls["decide"]) == 1
 
 
-async def test_claims_are_checked_concurrently():
-    extract = json.dumps(
-        {"claims": [{"claim": f"claim {i}", "queries": [f"q{i}"]} for i in range(3)]}
-    )
-    checker, _ = make_checker(extract, '{"verdict":"true"}', search_delay=0.3)
-    loop = asyncio.get_running_loop()
-    t0 = loop.time()
-    results = await checker.process(
-        "three separate factual claims in one sentence here"
-    )
-    assert len(results) == 3
-    assert loop.time() - t0 < 0.6  # sequential would take >= 0.9s
-
-
-async def test_bad_llm_output_degrades_to_unverified():
-    checker, _ = make_checker("not json", "also not json")
+async def test_bad_output_degrades_gracefully():
+    checker, _ = make_checker("not json", [])
     assert await checker.process("some sentence with enough words in it") == []
-    result = await checker.check_claim(Claim("x", ["x"]))
-    assert result.verdict == "unverified" and not result.needs_flag
+
+    checker, _ = make_checker(["X is Y"], [0.05], correction="nope")
+    [r] = await checker.process("x is y and that is a fact")
+    assert r.verdict == "false"
+    assert r.spoken() == "That's false, but I couldn't find the right answer."
+
+
+async def test_decisions_failure_is_unverified():
+    async def chat(system, user):
+        return json.dumps({"claims": ["X is Y"]})
+
+    async def decide(state, questions):
+        raise RuntimeError("network down")
+
+    [r] = await FactChecker(chat, decide).process("x is y and that is a fact")
+    assert r.verdict == "unverified"
 
 
 async def test_fact_check_agent_builds(monkeypatch):
