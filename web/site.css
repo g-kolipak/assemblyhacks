@@ -141,6 +141,20 @@ button:disabled { opacity: .55; cursor: default; }
 }
 .caption.muted { color: var(--grey); font-weight: 400; }
 
+/* Jeff's calls: every finished sentence and whether Jeff sends it to Parallel. */
+.jeff { margin: 8px 0 20px; }
+.jeff h2 { margin: 0; font-size: 18px; font-weight: 800; }
+.jeff-intro { margin: 2px 0 10px; font-size: 14px; color: var(--grey); }
+.jeff-log { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column-reverse; gap: 6px; max-height: 260px; overflow-y: auto; }
+.jeff-log:empty::before { content: "No sentences yet."; color: var(--grey); font-size: 14px; }
+.line { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: start; padding: 8px 12px; border-radius: 12px; background: #141414; font-size: 15px; }
+.line-text { color: var(--soft); }
+.line.flagged .line-text { color: var(--white); }
+.call { font-size: 12px; font-weight: 700; white-space: nowrap; padding: 2px 10px; border-radius: 999px; color: var(--grey); border: 1px solid var(--line); }
+.line.reading .call { color: var(--soft); border-style: dashed; }
+.line.flagged .call { color: var(--white); background: var(--checking); border-color: var(--checking); }
+.line.skipped .call { color: var(--grey); }
+
 /* Verdict cards (markup comes from ui.js, shared with the extension). */
 #feed { display: flex; flex-direction: column-reverse; gap: 12px; }
 #feed:empty::before { content: "Verdicts pop up here, newest on top."; color: var(--grey); font-size: 15px; }

@@ -171,6 +171,33 @@ function queueVoice(event) {
   playNextVoice();
 }
 
+// Jeff's calls: each finished sentence, then whether Jeff sends it to Parallel.
+function addLine(event) {
+  const li = document.createElement("li");
+  li.className = "line reading";
+  li.id = `line-${event.id}`;
+  const text = document.createElement("span");
+  text.className = "line-text";
+  text.textContent = event.text;
+  const call = document.createElement("span");
+  call.className = "call";
+  call.textContent = "Jeff is reading";
+  li.append(text, call);
+  const log = $("jeff-log");
+  log.append(li);
+  while (log.children.length > 40) log.firstElementChild.remove();
+}
+
+function markLine(event) {
+  const li = $(`line-${event.id}`);
+  if (!li) return;
+  li.classList.remove("reading");
+  li.classList.add(event.check ? "flagged" : "skipped");
+  const call = li.querySelector(".call");
+  call.textContent = event.check ? "Checking it" : `Skipped: ${event.reason || "nothing to check"}`;
+  call.title = event.reason || "";
+}
+
 function onEvent(event) {
   render(event);
   if (event.type === "status" && event.status === "listening") eye.setListening(true);
@@ -179,6 +206,8 @@ function onEvent(event) {
     showVideo(event.video_id).catch((err) => render({ type: "error", message: err.message }));
   }
   if (event.type === "speech") queueVoice(event);
+  if (event.type === "sentence") addLine(event);
+  if (event.type === "jeff") markLine(event);
   if (event.type === "ended") {
     $("status").textContent = "Video finished. Wrapping up the last checks…";
   }
@@ -234,6 +263,7 @@ async function start(kind) {
   if (kind === "youtube" && !link) throw new Error("Paste a YouTube link first.");
   clearFeed();
   resetTally();
+  $("jeff-log").replaceChildren();
   pendingChecks = 0;
 
   if (kind === "youtube") {

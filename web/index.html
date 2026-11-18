@@ -23,7 +23,7 @@
   <canvas id="scene" aria-hidden="true"></canvas>
   <div class="app">
     <div class="stage">
-      <div id="eye-slot" class="eye-slot" title="Poke me"></div>
+      <div id="eye-slot" class="eye-slot" title="Poke Jeff"></div>
       <h1 class="wordmark"><img src="/img/wordmark.png" alt="blink" width="252" height="96" /></h1>
       <p class="tagline">Checks your facts faster than you blink.</p>
     </div>
@@ -83,6 +83,11 @@
       </ul>
 
       <section id="caption" class="caption muted">What blink hears shows up here.</section>
+      <section class="jeff" aria-labelledby="jeff-title">
+        <h2 id="jeff-title">Jeff's calls</h2>
+        <p class="jeff-intro">Jeff reads every sentence as it ends and decides if it's worth checking.</p>
+        <ol id="jeff-log" class="jeff-log" aria-live="polite"></ol>
+      </section>
       <section id="feed" aria-live="polite"></section>
 
       <details class="settings">

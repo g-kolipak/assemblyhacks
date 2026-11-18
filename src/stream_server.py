@@ -24,6 +24,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from urllib.parse import urlencode
@@ -45,6 +46,10 @@ defaults = dotenv_values(Path(__file__).with_name("gateway.env"))
 LLM_MODEL = os.environ.get("LLM_MODEL", defaults["LLM_MODEL"])
 # Extra gateway models used when LLM_MODEL's per-minute budget is spent.
 LLM_FALLBACKS = os.environ.get("BLINK_LLM_FALLBACKS", "qwen3.5-4b-32k-fast")
+# "sentences": Jeff judges every finished sentence, in order (one gateway call
+# per sentence). "words": detect claims every STEP_WORDS words (faster, but
+# far more gateway calls).
+DETECT_MODE = os.environ.get("BLINK_DETECT", "sentences")
 # Word-by-word partials (~60 messages per 15 s of speech versus ~20 for
 # Universal-3 Pro), so claims are visible as soon as their last word is said.
 STT_MODEL = os.environ.get("BLINK_STT_MODEL", "universal-streaming-english")
@@ -155,6 +160,69 @@ class ClaimWatcher:
     async def drain(self) -> None:
         if self._task is not None:
             await self._task
+
+
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+MIN_SENTENCE_WORDS = 4  # "Okay, so." is not worth asking Jeff about
+
+
+def split_sentences(text: str) -> list[str]:
+    parts = (p.strip() for p in SENTENCE_SPLIT.split(text or ""))
+    return [p for p in parts if len(p.split()) >= MIN_SENTENCE_WORDS]
+
+
+class SentenceGate:
+    """Jeff reads every finished sentence, one at a time and in order, and
+    says whether it should be fact-checked. Flagged claims go to `on_claims`
+    at once; Jeff moves on to the next sentence while Parallel checks it.
+
+    Sentences come from AssemblyAI's formatted end-of-turn transcripts, which
+    carry punctuation; a turn with several sentences is split.
+    """
+
+    def __init__(self, checker: FactChecker, outbox: asyncio.Queue, on_claims) -> None:
+        self._checker = checker
+        self._outbox = outbox
+        self._on_claims = on_claims
+        self._queue: asyncio.Queue[tuple[int, str, float]] = asyncio.Queue()
+        self._done_turns: set[object] = set()
+        self._previous = ""
+        self._count = 0
+        self._task = asyncio.create_task(self._run())
+
+    def feed(self, msg: dict) -> None:
+        if not msg.get("end_of_turn") or msg.get("turn_is_formatted") is False:
+            return  # wait for the punctuated copy of the finished turn
+        turn = msg.get("turn_order")
+        if turn in self._done_turns:
+            return
+        self._done_turns.add(turn)
+        for sentence in split_sentences(msg.get("transcript", "")):
+            self._count += 1
+            self._outbox.put_nowait(
+                {"type": "sentence", "id": self._count, "text": sentence}
+            )
+            self._queue.put_nowait((self._count, sentence, time.perf_counter()))
+
+    async def _run(self) -> None:
+        while True:
+            n, sentence, heard_at = await self._queue.get()
+            try:
+                call = await self._checker.judge(sentence, self._previous)
+            except Exception:
+                logger.exception("Jeff could not judge a sentence")
+                call = {"check": False, "claim": None, "reason": "Jeff is busy"}
+            self._previous = sentence
+            self._outbox.put_nowait({"type": "jeff", "id": n, **call})
+            if call["check"]:
+                self._on_claims(
+                    [call["claim"]], heard_at, time.perf_counter() - heard_at
+                )
+            self._queue.task_done()
+
+    async def drain(self) -> None:
+        await self._queue.join()
+        self._task.cancel()
 
 
 def result_event(
@@ -397,6 +465,9 @@ async def _run_session(
         task.add_done_callback(tasks.discard)
 
     watcher = ClaimWatcher(checker, on_claims)
+    gate = (
+        SentenceGate(checker, outbox, on_claims) if DETECT_MODE == "sentences" else None
+    )
 
     async def from_assemblyai(aai: aiohttp.ClientWebSocketResponse) -> None:
         nonlocal speaker
@@ -419,9 +490,12 @@ async def _run_session(
                             "speaker": speaker,
                         }
                     )
-                text = window.feed(data)
-                if text:
-                    watcher.update(text)
+                if gate is not None:
+                    gate.feed(data)
+                else:
+                    text = window.feed(data)
+                    if text:
+                        watcher.update(text)
             elif kind == "Termination":
                 break
             elif "error" in data:
@@ -466,6 +540,8 @@ async def _run_session(
         pass
     finally:
         await watcher.drain()
+        if gate is not None:
+            await gate.drain()
         if tasks:
             await asyncio.wait(tasks, timeout=10)
         while not outbox.empty():

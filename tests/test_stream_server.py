@@ -165,6 +165,7 @@ async def test_stream_end_to_end_with_fakes(monkeypatch):
         )
         monkeypatch.setattr(stream_server, "ParallelAPI", FakeParallel)
         monkeypatch.setattr(stream_server, "gateway_chat", lambda model: chat)
+        monkeypatch.setattr(stream_server, "DETECT_MODE", "words")
         monkeypatch.setenv("ASSEMBLYAI_API_KEY", "test")
         async with TestServer(stream_server.build_app()) as server:
             async with aiohttp.ClientSession() as http:
@@ -191,3 +192,59 @@ async def test_stream_end_to_end_with_fakes(monkeypatch):
         "That's false. Actually, Everest is 8,849 metres tall. Source: Wiki."
     )
     assert got_audio == [1600]
+
+
+async def test_jeff_judges_each_finished_sentence_in_order():
+    import asyncio
+
+    from stream_server import SentenceGate, split_sentences
+
+    assert split_sentences("Okay. Everest is 6000 m tall. I love hiking a lot.") == [
+        "Everest is 6000 m tall.",
+        "I love hiking a lot.",
+    ]
+
+    class FakeChecker:
+        seen = []
+
+        async def judge(self, sentence, previous=""):
+            self.seen.append((sentence, previous))
+            if "Everest" in sentence:
+                return {"check": True, "claim": sentence, "reason": "a height"}
+            return {"check": False, "claim": None, "reason": "opinion"}
+
+    outbox: asyncio.Queue = asyncio.Queue()
+    fired = []
+    gate = SentenceGate(FakeChecker(), outbox, lambda c, t, d: fired.extend(c))
+    text = "Everest is 6000 m tall. I love hiking a lot."
+    gate.feed(
+        {
+            "turn_order": 0,
+            "end_of_turn": True,
+            "turn_is_formatted": False,
+            "transcript": text.lower(),
+        }
+    )
+    gate.feed(
+        {
+            "turn_order": 0,
+            "end_of_turn": True,
+            "turn_is_formatted": True,
+            "transcript": text,
+        }
+    )
+    gate.feed(
+        {
+            "turn_order": 0,
+            "end_of_turn": True,
+            "turn_is_formatted": True,
+            "transcript": text,
+        }
+    )  # duplicate copy of the same turn
+    await gate.drain()
+
+    events = [outbox.get_nowait() for _ in range(outbox.qsize())]
+    assert [e["type"] for e in events] == ["sentence", "sentence", "jeff", "jeff"]
+    assert [e["check"] for e in events if e["type"] == "jeff"] == [True, False]
+    assert fired == ["Everest is 6000 m tall."]
+    assert FakeChecker.seen[1] == ("I love hiking a lot.", "Everest is 6000 m tall.")

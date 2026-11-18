@@ -120,6 +120,18 @@ Rewrite each claim so it stands alone. Return JSON only:
 {{"claims":["standalone claim", "..."]}}
 Return at most {max_claims} claims, or {{"claims":[]}} if none are complete."""
 
+JEFF_SYSTEM = """\
+You are Jeff, the gatekeeper of a live fact-checker. Today is {today}.
+You get ONE sentence that was just spoken, plus the sentence before it for
+context. Decide whether it should be fact-checked: does it contain a specific
+factual claim about the world that public sources could confirm or refute
+(numbers, dates, records, who did what, scientific facts, rankings, quotes)?
+Skip opinions, predictions, jokes, questions, greetings, instructions,
+personal anecdotes and vague statements. If it should be checked, rewrite the
+claim so it stands alone (resolve pronouns from the context). Return JSON only:
+{{"check": true, "claim": "standalone claim", "reason": "at most 6 words"}}
+or {{"check": false, "reason": "at most 6 words"}}"""
+
 CORRECTION_SYSTEM = """\
 A fact checker found this claim to be wrong. Today is {today}. Using ONLY the
 source excerpts provided, state the right answer. Return JSON only:
@@ -265,6 +277,32 @@ class FactChecker:
         except (json.JSONDecodeError, ValueError, AttributeError):
             logger.warning("Could not parse live extraction: %r", raw[:200])
             return []
+
+    async def judge(self, sentence: str, previous: str = "") -> dict[str, Any]:
+        """Jeff's call on one finished sentence: check it or skip it."""
+        raw = await self._chat(
+            JEFF_SYSTEM.format(today=_today()),
+            f"Previous sentence: {previous or '(none)'}\nSentence: {sentence}",
+        )
+        try:
+            data = parse_json(raw)
+        except (json.JSONDecodeError, ValueError):
+            data = None
+        if not isinstance(data, dict):
+            logger.warning("Could not parse Jeff's answer: %r", raw[:200])
+            return {"check": False, "claim": None, "reason": "unreadable answer"}
+        reason = str(data.get("reason") or "").strip()[:80]
+        if not data.get("check"):
+            return {
+                "check": False,
+                "claim": None,
+                "reason": reason or "nothing to check",
+            }
+        claim = str(data.get("claim") or sentence).strip()
+        accepted = self._accept([claim])
+        if not accepted:
+            return {"check": False, "claim": None, "reason": "already checked"}
+        return {"check": True, "claim": accepted[0], "reason": reason}
 
     async def extract_claims(self, utterance: str) -> list[str]:
         context = "\n".join(self._context[-self._context_turns :])
