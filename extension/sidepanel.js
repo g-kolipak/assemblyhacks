@@ -1,7 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const feed = $("feed");
 const LABELS = { true: "True", false: "False", misleading: "Misleading", unverified: "Unverified" };
-let lastSentence = null;
+const pending = new Map(); // claim text -> "Checking…" card
 
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -20,18 +20,16 @@ function render(event) {
       $("caption").classList.remove("muted");
       $("caption").textContent = (event.speaker ? `${event.speaker}: ` : "") + event.text;
       break;
-    case "sentence": {
-      // Placeholder while the claim is being checked; replaced by verdicts.
-      lastSentence = el("div", "card pending");
-      lastSentence.append(el("span", "badge", "Checking…"), el("p", "claim", event.text));
-      feed.append(lastSentence);
-      break;
-    }
-    case "verdict": {
-      if (lastSentence && lastSentence.classList.contains("pending")) {
-        lastSentence.remove();
-        lastSentence = null;
+    case "checking":
+      // A claim was just detected mid-speech; its web check is in flight.
+      for (const claim of event.claims) {
+        const card = el("div", "card pending");
+        card.append(el("span", "badge", "Checking the web…"), el("p", "claim", claim));
+        pending.set(claim, card);
+        feed.append(card);
       }
+      break;
+    case "verdict": {
       const card = el("div", `card ${event.verdict}`);
       const pct = event.probability == null ? "" : ` · ${Math.round(event.probability * 100)}% likely true`;
       card.append(el("span", "badge", LABELS[event.verdict] + pct), el("p", "claim", event.claim));
@@ -43,10 +41,16 @@ function render(event) {
         a.target = "_blank";
         meta.append(a, " · ");
       }
-      meta.append(`${(event.latency_ms / 1000).toFixed(1)}s after the sentence`);
+      meta.append(`${(event.latency_ms / 1000).toFixed(1)}s after it was said`);
       if (event.speaker) meta.append(` · speaker ${event.speaker}`);
       card.append(meta);
-      feed.append(card);
+      const placeholder = pending.get(event.claim);
+      if (placeholder) {
+        placeholder.replaceWith(card);
+        pending.delete(event.claim);
+      } else {
+        feed.append(card);
+      }
       break;
     }
     case "error":

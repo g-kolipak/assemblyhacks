@@ -1,7 +1,13 @@
 """Offline tests for the streaming backend's transcript segmentation."""
 
 from fact_check import CheckResult
-from stream_server import TurnSegmenter, build_app, origin_allowed, result_event
+from stream_server import (
+    ClaimWatcher,
+    LiveWindow,
+    build_app,
+    origin_allowed,
+    result_event,
+)
 
 
 def turn(order, words, *, final=True, end=False, transcript=None):
@@ -16,36 +22,51 @@ def turn(order, words, *, final=True, end=False, transcript=None):
     return msg
 
 
-def test_end_of_turn_emits_transcript_once():
-    seg = TurnSegmenter()
-    assert seg.feed(turn(0, "Everest is six thousand", final=False)) == []
-    text = "Everest is six thousand metres tall."
-    assert seg.feed(turn(0, text, end=True, transcript=text)) == [text]
-    # A second (formatted) end-of-turn message for the same turn is ignored.
-    assert seg.feed(turn(0, text, end=True, transcript=text)) == []
+def test_window_emits_every_step_words():
+    win = LiveWindow(step=2, size=45)
+    assert win.feed(turn(0, "Mount", final=False)) is None
+    assert win.feed(turn(0, "Mount Everest", final=False)) == "Mount Everest"
+    assert win.feed(turn(0, "Mount Everest is", final=False)) is None
+    assert win.feed(turn(0, "Mount Everest is about", final=False)) == (
+        "Mount Everest is about"
+    )
 
 
-def test_long_monologue_flushes_at_sentence_boundary():
-    seg = TurnSegmenter()
-    first = "The Moon is about three hundred eighty four thousand km away."
-    talk = first + " And the Sun is"
-    assert seg.feed(turn(1, talk)) == [first]
-    # The rest is emitted at end of turn without repeating the first sentence.
-    rest = talk + " a star."
-    assert seg.feed(turn(1, rest, end=True, transcript=rest)) == [
-        "And the Sun is a star."
-    ]
+def test_window_keeps_history_and_ignores_formatted_copy():
+    win = LiveWindow(step=2, size=6)
+    text = "Everest is 6,000 meters tall."
+    assert (
+        win.feed(
+            turn(0, "everest is six thousand meters tall", end=True, transcript=text)
+        )
+        == text
+    )
+    assert win.feed(turn(0, text, end=True, transcript=text)) is None
+    # Next turn: the window keeps the newest `size` words across turns.
+    assert win.feed(turn(1, "And the Great", final=False)) == (
+        "6,000 meters tall. And the Great"
+    )
 
 
-def test_partial_sentence_flushes_once_speaker_moves_on():
-    seg = TurnSegmenter()
-    # Sentence end is the last (revisable) word: wait.
-    assert seg.feed(turn(2, "The Great Wall is visible from space.", final=False)) == []
-    # More words follow it, so the sentence is done; check it now.
-    msg = turn(2, "The Great Wall is visible from space. Anyway, the", final=False)
-    assert seg.feed(msg) == ["The Great Wall is visible from space."]
-    # Too-short sentences wait to be grouped with the next one.
-    assert seg.feed(turn(3, "So yes. And then", final=False)) == []
+async def test_watcher_coalesces_to_latest_window():
+    import asyncio
+
+    seen_windows, fired = [], []
+
+    class FakeChecker:
+        async def extract_live(self, window):
+            seen_windows.append(window)
+            await asyncio.sleep(0.05)
+            return [f"claim from {window}"] if "tall" in window else []
+
+    watcher = ClaimWatcher(FakeChecker(), lambda claims, t: fired.extend(claims))
+    for w in ["a b", "a b c d", "a b c d e f", "a b c d e f tall"]:
+        watcher.update(w)
+        await asyncio.sleep(0)
+    await watcher.drain()
+    # First call ran at once; the two stale windows were skipped.
+    assert seen_windows == ["a b", "a b c d e f tall"]
+    assert fired == ["claim from a b c d e f tall"]
 
 
 def test_origin_check(monkeypatch):
@@ -88,8 +109,9 @@ async def test_stream_end_to_end_with_fakes(monkeypatch):
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.BINARY:
                 got_audio.append(len(msg.data))
-                text = "Mount Everest is about six thousand metres tall."
-                await ws.send_json(turn(0, text, end=True, transcript=text))
+                words = "Mount Everest is about six thousand metres tall".split()
+                for n in range(1, len(words) + 1):
+                    await ws.send_json(turn(0, " ".join(words[:n]), final=True))
             elif json.loads(msg.data).get("type") == "Terminate":
                 await ws.send_json({"type": "Termination"})
                 break
@@ -109,8 +131,11 @@ async def test_stream_end_to_end_with_fakes(monkeypatch):
             pass
 
     async def chat(system, user):
-        if "extract" in system:
-            return json.dumps({"claims": ["Mount Everest is 6000 m tall"]})
+        if "LIVE" in system:
+            # Only report the claim once its last word has arrived.
+            if "metres tall <<live>>" in user:
+                return json.dumps({"claims": ["Mount Everest is 6000 m tall"]})
+            return json.dumps({"claims": []})
         return json.dumps(
             {"correction": "Everest is 8,849 metres tall", "source": "Wiki"}
         )
@@ -138,7 +163,8 @@ async def test_stream_end_to_end_with_fakes(monkeypatch):
                 await ws.close()
 
     kinds = [e["type"] for e in events]
-    assert kinds[:2] == ["status", "sentence"] and kinds[-1] == "verdict"
+    assert kinds[0] == "status" and "checking" in kinds and kinds[-1] == "verdict"
+    assert kinds.count("checking") == 1  # detected once, not re-checked
     verdict = events[-1]
     assert verdict["verdict"] == "false"
     assert verdict["speak"] == (

@@ -84,10 +84,9 @@ The `extension/` folder is a Chrome extension. It fact-checks whatever is playin
 
 ```
 Tab audio ──tabCapture──▶ offscreen doc ──16 kHz PCM / WebSocket──▶ stream_server.py (localhost)
-                                                                     │  AssemblyAI streaming STT
-                                                                     │  sentence cut while still talking
-                                                                     │  claim extraction (AssemblyAI LLM gateway)
-                                                                     │  Parallel Decisions: one live web call per sentence
+                                                                     │  AssemblyAI streaming STT (word by word)
+                                                                     │  live claim detection every 2 new words
+                                                                     │  Parallel Decisions fires the moment a claim is complete
 side panel + chrome.tts (spoken verdict) ◀────────── verdict JSON ──┘
 ```
 
@@ -105,14 +104,16 @@ uv run python src/stream_server.py      # listens on ws://127.0.0.1:8765/stream
 ### How it stays fast
 
 - Audio streams continuously in 50 ms frames. Nothing waits for the video to end.
-- A sentence is sent for checking as soon as the speaker starts the next one. AssemblyAI's punctuated partial transcripts (with `continuous_partials`, about every 3 s) show where sentences end, so the backend doesn't wait for a pause, which podcasters rarely take.
-- Each sentence makes **one** Parallel Decisions call (`mode: "fast"`, usually under a second), with every claim in that sentence batched together. Sentences are checked concurrently, so a slow check never holds up the next one.
-- True verdicts are sent the moment Decisions answers. Only false claims pay for the extra correction step.
+- AssemblyAI `universal-streaming-english` sends the transcript **word by word**.
+- **No waiting for sentences.** Every 2 new words (`BLINK_STEP_WORDS`), the live transcript goes to claim detection. A Parallel Decisions web call fires the moment a claim is complete, often before the speaker reaches the end of the sentence. "The Eiffel Tower is in Paris, and it was finished in 1889" is checked twice: once right after "Paris", and again after "1889".
+- Detection is careful with half-heard claims. "Everest is about six thousand…" isn't checked until it's clear the number has ended.
+- Only one detection call runs at a time, always on the newest words, and web checks run in parallel. Claims that were already checked are skipped, even if they're reworded.
+- True verdicts are sent the moment Decisions answers (about 0.6–0.8 s). Only false claims pay for the extra correction step.
 - The spoken verdict uses Chrome's built-in text-to-speech, so there's no extra network hop.
 
-In practice, a verdict arrives about one to two seconds after a sentence ends. The latency is shown on every card.
+Measured on a real podcast-style clip, verdicts arrive about 1.4–2.7 seconds after the claim's last word is spoken. The latency is shown on every card.
 
-**Settings** (in the side panel): what to say out loud (every verdict, only false ones, or nothing), voice speed, and the server URL. Backend settings are `AAI_MIN_TURN_SILENCE`, `AAI_MAX_TURN_SILENCE`, `FACTCHECK_MIN_WORDS` and `FACTCHECK_PORT`.
+**Settings** (in the side panel): what to say out loud (every verdict, only false ones, or nothing), voice speed, and the server URL. Backend settings are `BLINK_STT_MODEL`, `BLINK_STEP_WORDS`, `BLINK_WINDOW_WORDS`, `AAI_MIN_TURN_SILENCE`, `AAI_MAX_TURN_SILENCE` and `FACTCHECK_PORT`.
 
 **Privacy:** tab audio is sent to AssemblyAI to be transcribed, and claims are sent to Parallel and the AssemblyAI LLM gateway. The backend binds to `127.0.0.1` and only accepts connections from Chrome extensions.
 

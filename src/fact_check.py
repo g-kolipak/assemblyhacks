@@ -104,6 +104,21 @@ the context). Return JSON only, no prose:
 {{"claims":["standalone claim", "..."]}}
 Return at most {max_claims} claims. If there are none, return {{"claims":[]}}."""
 
+EXTRACT_LIVE_SYSTEM = """\
+You watch a LIVE speech transcript word by word and extract checkable factual
+claims the moment they are fully stated. Today is {today}. A checkable claim is
+a specific statement about the world that public sources could confirm or
+refute: numbers, dates, records, who did what, scientific facts, rankings.
+Ignore opinions, predictions, jokes, questions and vague statements.
+The transcript is still being spoken and ends mid-stream at <<live>>. Only
+extract a claim when it is COMPLETE. If the words just before <<live>> could
+still change its meaning (a number that may continue, e.g. "six thousand" ->
+"six thousand eight hundred", a missing unit, object or qualifier), wait.
+Never repeat a claim from the already-checked list, even reworded.
+Rewrite each claim so it stands alone. Return JSON only:
+{{"claims":["standalone claim", "..."]}}
+Return at most {max_claims} claims, or {{"claims":[]}} if none are complete."""
+
 CORRECTION_SYSTEM = """\
 A fact checker found this claim to be wrong. Today is {today}. Using ONLY the
 source excerpts provided, state the right answer. Return JSON only:
@@ -200,6 +215,51 @@ class FactChecker:
         self._context: list[str] = []
         self._context_turns = context_turns
         self._seen: set[str] = set()
+        self._seen_terms: list[set[str]] = []
+        self.checked: list[str] = []
+
+    def is_duplicate(self, claim: str) -> bool:
+        """Exact or reworded repeat of a claim already sent for checking."""
+        if _normalize(claim) in self._seen:
+            return True
+        terms = _terms(claim)
+        for seen in self._seen_terms:
+            union = terms | seen
+            if union and len(terms & seen) / len(union) >= 0.6:
+                return True
+        return False
+
+    def _accept(self, raw_claims: list) -> list[str]:
+        claims = []
+        for item in raw_claims[: self.max_claims]:
+            text = item.get("claim", "") if isinstance(item, dict) else item
+            text = str(text).strip()
+            if not text or self.is_duplicate(text):
+                continue
+            self._seen.add(_normalize(text))
+            self._seen_terms.append(_terms(text))
+            self.checked.append(text)
+            claims.append(text)
+        return claims
+
+    async def extract_live(self, window: str) -> list[str]:
+        """Claims fully stated so far in a live transcript window.
+
+        Called repeatedly as words stream in; returns only claims that have
+        not been sent for checking yet.
+        """
+        if len(window.split()) < 4:
+            return []
+        already = "\n".join(f"- {c}" for c in self.checked[-12:]) or "(none)"
+        raw = await self._chat(
+            EXTRACT_LIVE_SYSTEM.format(today=_today(), max_claims=self.max_claims),
+            f"Already checked:\n{already}\n\nLive transcript:\n{window} <<live>>",
+        )
+        try:
+            return self._accept(parse_json(raw).get("claims", []))
+        except (json.JSONDecodeError, ValueError, AttributeError):
+            logger.warning("Could not parse live extraction: %r", raw[:200])
+            return []
 
     async def extract_claims(self, utterance: str) -> list[str]:
         context = "\n".join(self._context[-self._context_turns :])
@@ -215,16 +275,7 @@ class FactChecker:
         except (json.JSONDecodeError, ValueError):
             logger.warning("Could not parse claim extraction: %r", raw[:200])
             return []
-        claims = []
-        for item in data.get("claims", [])[: self.max_claims]:
-            text = item.get("claim", "") if isinstance(item, dict) else item
-            text = str(text).strip()
-            key = _normalize(text)
-            if not text or key in self._seen:
-                continue
-            self._seen.add(key)
-            claims.append(text)
-        return claims
+        return self._accept(data.get("claims", []))
 
     async def _correct(self, claim: str, citations: list[dict]) -> dict[str, str]:
         if not citations:

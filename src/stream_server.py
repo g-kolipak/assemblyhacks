@@ -4,10 +4,10 @@ The extension captures a tab's audio (YouTube, podcasts, anything) and streams
 16 kHz mono PCM over a WebSocket to this server. The server:
 
   1. Forwards the audio to AssemblyAI streaming speech-to-text.
-  2. Cuts the live transcript into sentences as soon as they are final. Long
-     monologues are flushed mid-turn, so checks never wait for a pause.
-  3. Runs each sentence through `FactChecker` (claim extraction, one Parallel
-     Decisions call, a correction for false claims) in the background.
+  2. Watches the transcript word by word. Every couple of new words, the live
+     window goes to claim detection; it never waits for a sentence to end.
+  3. The moment a complete claim appears, it fires one Parallel Decisions
+     call for it (plus a correction for false claims) in the background.
   4. Streams captions and verdicts back to the extension as JSON.
 
 Keys stay on this machine; the extension never sees them.
@@ -21,7 +21,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import time
 from pathlib import Path
 from urllib.parse import urlencode
@@ -39,19 +38,24 @@ logger = logging.getLogger("factcheck.server")
 
 defaults = dotenv_values(Path(__file__).with_name("gateway.env"))
 LLM_MODEL = os.environ.get("LLM_MODEL", defaults["LLM_MODEL"])
-STT_MODEL = os.environ.get("ASSEMBLYAI_STT_MODEL", "universal-3-6-pro")
+# Word-by-word partials (~60 messages per 15 s of speech versus ~20 for
+# Universal-3 Pro), so claims are visible as soon as their last word is said.
+STT_MODEL = os.environ.get("BLINK_STT_MODEL", "universal-streaming-english")
+U3_PRO_MODELS = ("u3-rt-pro", "universal-3-5-pro", "universal-3-6-pro")
 AAI_URL = "wss://streaming.assemblyai.com/v3/ws"
 SAMPLE_RATE = 16000
 
-# A sentence is sent for checking once it has at least this many words.
-MIN_SENTENCE_WORDS = int(os.environ.get("FACTCHECK_MIN_WORDS", "5"))
+# Run claim detection after this many new words. Detection is coalesced (one
+# call in flight, always on the newest words), so a small step costs little.
+STEP_WORDS = int(os.environ.get("BLINK_STEP_WORDS", "2"))
+# Words of transcript the detector sees (older speech gives context).
+WINDOW_WORDS = int(os.environ.get("BLINK_WINDOW_WORDS", "45"))
 # AssemblyAI accepts 20-1000 ms per audio message.
 MAX_FRAME_BYTES = SAMPLE_RATE * 2  # one second of 16-bit mono
-SENTENCE_END = re.compile(r"[.?!][\"')\]]*$")
 
 
 def assemblyai_url() -> str:
-    params = {
+    params: dict[str, object] = {
         "sample_rate": SAMPLE_RATE,
         "encoding": "pcm_s16le",
         "speech_model": STT_MODEL,
@@ -59,57 +63,88 @@ def assemblyai_url() -> str:
         # Short silences end turns quickly; podcasts rarely pause for long.
         "min_turn_silence": os.environ.get("AAI_MIN_TURN_SILENCE", "160"),
         "max_turn_silence": os.environ.get("AAI_MAX_TURN_SILENCE", "1000"),
-        "speaker_labels": "true",
-        # Extra partials every ~3 s during long monologues, so sentences can
-        # be checked before the speaker pauses.
-        "continuous_partials": "true",
     }
+    if STT_MODEL in U3_PRO_MODELS:
+        params.update(speaker_labels="true", continuous_partials="true")
     return f"{AAI_URL}?{urlencode(params)}"
 
 
-class TurnSegmenter:
-    """Turn AssemblyAI `Turn` messages into sentences ready to fact-check.
+class LiveWindow:
+    """Rolling transcript window built from AssemblyAI `Turn` messages.
 
-    Words in a turn are cumulative. Universal-3 Pro only marks words final at
-    the end of a turn, but its partials are punctuated, so a sentence that is
-    already followed by more words is finished and can be checked right away,
-    mid-monologue. The rest of the turn is emitted at end of turn.
+    Words inside a turn are cumulative and may be revised until the turn ends,
+    so each message replaces the current turn. Finished turns move to history.
+    `feed` returns the new window once at least `step` words were added.
     """
 
-    def __init__(self, min_words: int = MIN_SENTENCE_WORDS) -> None:
-        self.min_words = min_words
+    def __init__(self, step: int = STEP_WORDS, size: int = WINDOW_WORDS) -> None:
+        self.step, self.size = step, size
+        self._history: list[str] = []
+        self._current: list[str] = []
         self._turn: object = None
-        self._done = 0
         self._closed: set[object] = set()
+        self._emitted_at = 0  # total word count at the last emitted window
 
-    def feed(self, msg: dict) -> list[str]:
+    @property
+    def total(self) -> int:
+        return len(self._history) + len(self._current)
+
+    def text(self) -> str:
+        return " ".join((self._history + self._current)[-self.size :])
+
+    def feed(self, msg: dict) -> str | None:
         turn = msg.get("turn_order")
         if turn in self._closed:
-            return []  # e.g. a formatted copy of a turn we already flushed
-        if turn != self._turn:
-            self._turn, self._done = turn, 0
-        words = msg.get("words") or []
-
-        if msg.get("end_of_turn"):
+            return None  # formatted copy of a finished turn
+        words = [w["text"] for w in msg.get("words") or []]
+        if msg.get("end_of_turn") and msg.get("transcript"):
+            words = msg["transcript"].split()
+        self._turn, self._current = turn, words
+        ended = bool(msg.get("end_of_turn"))
+        if ended:
             self._closed.add(turn)
-            text = msg.get("transcript") or " ".join(w["text"] for w in words)
-            if self._done:
-                # Part of this turn was already flushed; send only the rest.
-                text = " ".join(w["text"] for w in words[self._done :])
-            self._done = len(words)
-            return [text.strip()] if text.strip() else []
+            self._history = (self._history + self._current)[-self.size :]
+            self._current = []
+        if ended or self.total - self._emitted_at >= self.step:
+            self._emitted_at = self.total
+            return self.text()
+        return None
 
-        pending = [w["text"] for w in words[self._done :]]
-        # The last word may still be revised unless it is final.
-        settled = len(pending) - (0 if words and words[-1].get("word_is_final") else 1)
-        cut = max(
-            (i for i, t in enumerate(pending[:settled]) if SENTENCE_END.search(t)),
-            default=-1,
-        )
-        if cut + 1 < self.min_words:
-            return []
-        self._done += cut + 1
-        return [" ".join(pending[: cut + 1])]
+
+class ClaimWatcher:
+    """Run live claim detection continuously, one call at a time.
+
+    `update` never blocks. If detection is busy, the newest window waits and
+    replaces any older waiting window, so the detector always reads the latest
+    words and requests never pile up. New claims go straight to `on_claims`.
+    """
+
+    def __init__(self, checker: FactChecker, on_claims) -> None:
+        self._checker = checker
+        self._on_claims = on_claims
+        self._pending: tuple[str, float] | None = None
+        self._task: asyncio.Task | None = None
+
+    def update(self, window: str) -> None:
+        self._pending = (window, time.perf_counter())
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        while self._pending is not None:
+            window, heard_at = self._pending
+            self._pending = None
+            try:
+                claims = await self._checker.extract_live(window)
+            except Exception:
+                logger.exception("Live claim detection failed")
+                continue
+            if claims:
+                self._on_claims(claims, heard_at)
+
+    async def drain(self) -> None:
+        if self._task is not None:
+            await self._task
 
 
 def result_event(result: CheckResult, speaker: str | None, heard_at: float) -> dict:
@@ -146,26 +181,34 @@ async def stream_handler(request: web.Request) -> web.WebSocketResponse:
     outbox: asyncio.Queue[dict] = asyncio.Queue()
     parallel = ParallelAPI()
     checker = FactChecker(gateway_chat(LLM_MODEL), parallel.decide_raw)
-    segmenter = TurnSegmenter()
+    window = LiveWindow()
     tasks: set[asyncio.Task] = set()
+    speaker: str | None = None
 
     async def send_loop() -> None:
         while True:
             await client.send_json(await outbox.get())
 
-    async def check(text: str, speaker: str | None) -> None:
-        heard_at = time.perf_counter()
-        outbox.put_nowait({"type": "sentence", "text": text, "speaker": speaker})
+    async def check(claims: list[str], heard_at: float, who: str | None) -> None:
+        outbox.put_nowait({"type": "checking", "claims": claims, "speaker": who})
         try:
-            await checker.process(
-                text,
-                lambda r: outbox.put_nowait(result_event(r, speaker, heard_at)),
+            await checker.check_claims(
+                claims, lambda r: outbox.put_nowait(result_event(r, who, heard_at))
             )
         except Exception as e:
             logger.exception("Fact check failed")
             outbox.put_nowait({"type": "error", "message": f"Fact check failed: {e}"})
 
+    def on_claims(claims: list[str], heard_at: float) -> None:
+        # Fire the Decisions call immediately; detection keeps running.
+        task = asyncio.create_task(check(claims, heard_at, speaker))
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    watcher = ClaimWatcher(checker, on_claims)
+
     async def from_assemblyai(aai: aiohttp.ClientWebSocketResponse) -> None:
+        nonlocal speaker
         async for msg in aai:
             if msg.type != aiohttp.WSMsgType.TEXT:
                 continue
@@ -174,8 +217,8 @@ async def stream_handler(request: web.Request) -> web.WebSocketResponse:
             if kind == "Begin":
                 outbox.put_nowait({"type": "status", "status": "listening"})
             elif kind == "Turn":
-                speaker = data.get("speaker_label")
-                speaker = None if speaker in (None, "UNKNOWN") else speaker
+                label = data.get("speaker_label")
+                speaker = None if label in (None, "UNKNOWN") else label
                 if not data.get("end_of_turn"):
                     words = data.get("words") or []
                     outbox.put_nowait(
@@ -185,10 +228,9 @@ async def stream_handler(request: web.Request) -> web.WebSocketResponse:
                             "speaker": speaker,
                         }
                     )
-                for text in segmenter.feed(data):
-                    task = asyncio.create_task(check(text, speaker))
-                    tasks.add(task)
-                    task.add_done_callback(tasks.discard)
+                text = window.feed(data)
+                if text:
+                    watcher.update(text)
             elif kind == "Termination":
                 break
             elif "error" in data:
@@ -220,6 +262,7 @@ async def stream_handler(request: web.Request) -> web.WebSocketResponse:
     except (TimeoutError, asyncio.CancelledError):
         pass
     finally:
+        await watcher.drain()
         if tasks:
             await asyncio.wait(tasks, timeout=10)
         while not outbox.empty():
