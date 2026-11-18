@@ -43,6 +43,8 @@ logger = logging.getLogger("factcheck.server")
 
 defaults = dotenv_values(Path(__file__).with_name("gateway.env"))
 LLM_MODEL = os.environ.get("LLM_MODEL", defaults["LLM_MODEL"])
+# Extra gateway models used when LLM_MODEL's per-minute budget is spent.
+LLM_FALLBACKS = os.environ.get("BLINK_LLM_FALLBACKS", "qwen3.5-4b-32k-fast")
 # Word-by-word partials (~60 messages per 15 s of speech versus ~20 for
 # Universal-3 Pro), so claims are visible as soon as their last word is said.
 STT_MODEL = os.environ.get("BLINK_STT_MODEL", "universal-streaming-english")
@@ -333,7 +335,9 @@ async def _run_session(
 ) -> web.WebSocketResponse:
     outbox: asyncio.Queue[dict] = asyncio.Queue()
     parallel = ParallelAPI()
-    checker = FactChecker(gateway_chat(LLM_MODEL), parallel.decide_raw)
+    checker = FactChecker(
+        gateway_chat(f"{LLM_MODEL},{LLM_FALLBACKS}"), parallel.decide_raw
+    )
     window = LiveWindow()
     tasks: set[asyncio.Task] = set()
     speaker: str | None = None

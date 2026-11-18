@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import date
@@ -232,7 +233,11 @@ class FactChecker:
     def _accept(self, raw_claims: list) -> list[str]:
         claims = []
         for item in raw_claims[: self.max_claims]:
-            text = item.get("claim", "") if isinstance(item, dict) else item
+            text = (
+                (item.get("claim") or item.get("text") or "")
+                if isinstance(item, dict)
+                else item
+            )
             text = str(text).strip()
             if not text or self.is_duplicate(text):
                 continue
@@ -362,25 +367,86 @@ class FactChecker:
         return await self.check_claims(claims, on_result)
 
 
-def gateway_chat(model: str, api_key: str | None = None) -> ChatFn:
-    """Chat function backed by the AssemblyAI LLM gateway (OpenAI-compatible)."""
-    from openai import AsyncOpenAI
+class _Budget:
+    """Requests sent to one gateway model in the last minute."""
 
+    def __init__(self, per_minute: int) -> None:
+        self.per_minute = per_minute
+        self.calls: deque[float] = deque()
+        self.blocked_until = 0.0
+
+    def wait(self, now: float) -> float:
+        if now < self.blocked_until:
+            return self.blocked_until - now
+        while self.calls and now - self.calls[0] >= 60:
+            self.calls.popleft()
+        if len(self.calls) < self.per_minute:
+            return 0.0
+        return 60 - (now - self.calls[0])
+
+
+# Shared by every session in the process: the gateway limit is per API key.
+_BUDGETS: dict[str, _Budget] = {}
+
+
+def gateway_chat(model: str | list[str], api_key: str | None = None) -> ChatFn:
+    """Chat function backed by the AssemblyAI LLM gateway (OpenAI-compatible).
+
+    The gateway allows a fixed number of requests per minute per model
+    (LLM_RPM, default 28 of the 30 allowed). Calls are paced under that budget
+    and spill over to the next model in the list instead of hitting a 429 and
+    stalling for a minute. `model` may be a comma-separated list.
+    """
+    from openai import AsyncOpenAI, RateLimitError
+
+    models = model.split(",") if isinstance(model, str) else list(model)
+    models = [m.strip() for m in models if m.strip()]
+    per_minute = int(os.environ.get("LLM_RPM", "28"))
+    for m in models:
+        _BUDGETS.setdefault(m, _Budget(per_minute))
     client = AsyncOpenAI(
         base_url="https://llm-gateway.assemblyai.com/v1",
         api_key=api_key or os.environ["ASSEMBLYAI_API_KEY"],
+        max_retries=0,
+        timeout=20,
     )
 
+    async def pick() -> str:
+        while True:
+            now = time.monotonic()
+            wait, _, name = min(
+                (_BUDGETS[m].wait(now), i, m) for i, m in enumerate(models)
+            )
+            if wait <= 0:
+                _BUDGETS[name].calls.append(now)
+                return name
+            await asyncio.sleep(min(wait, 2.0))
+
     async def chat(system: str, user: str) -> str:
-        res = await client.chat.completions.create(
-            model=model,
-            temperature=0,
-            max_tokens=300,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        )
-        return res.choices[0].message.content or ""
+        for _ in range(len(models) + 1):
+            name = await pick()
+            try:
+                res = await client.chat.completions.create(
+                    model=name,
+                    temperature=0,
+                    max_tokens=300,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                )
+            except RateLimitError as e:
+                reset = e.response.headers.get("x-ratelimit-reset", "20")
+                try:
+                    pause = float(reset)
+                except ValueError:
+                    pause = 20.0
+                _BUDGETS[name].blocked_until = time.monotonic() + min(pause, 60.0)
+                logger.warning(
+                    "Gateway rate limit on %s; pausing it %.0fs", name, pause
+                )
+                continue
+            return res.choices[0].message.content or ""
+        raise RuntimeError("LLM gateway rate limit reached on every model")
 
     return chat
