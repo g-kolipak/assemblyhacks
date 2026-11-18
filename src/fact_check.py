@@ -250,7 +250,7 @@ class FactChecker:
         """
         if len(window.split()) < 4:
             return []
-        already = "\n".join(f"- {c}" for c in self.checked[-12:]) or "(none)"
+        already = "\n".join(f"- {c}" for c in self.checked[-6:]) or "(none)"
         raw = await self._chat(
             EXTRACT_LIVE_SYSTEM.format(today=_today(), max_claims=self.max_claims),
             f"Already checked:\n{already}\n\nLive transcript:\n{window} <<live>>",

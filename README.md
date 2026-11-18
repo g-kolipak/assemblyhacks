@@ -99,7 +99,9 @@ uv run python src/stream_server.py      # listens on ws://127.0.0.1:8765/stream
 
 **2. Load the extension.** Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and choose the `extension/` folder.
 
-**3. Use it.** Open a video and click the extension's toolbar icon. A side panel opens with live captions and a feed of verdict cards. Each card shows True, False, Misleading or Unverified, the probability, the **right answer** for anything false, the source, and how many seconds after the sentence the verdict arrived. Every verdict is also spoken, and the video's volume drops while the voice talks. Click the icon again, or **Stop**, to end.
+![BLINK side panel: live captions, verdicts with the right answer, and a latency meter on every check](docs/blink-sidepanel.png)
+
+**3. Use it.** Open a video and click the extension's toolbar icon. A side panel opens with live captions and a feed of verdict cards. Each card shows True, False, Misleading or Unverified, the probability, a highlighted **right answer** box for anything false, and the source. It also has a **latency meter**. While the check runs, the meter counts up live. When the verdict arrives, it shows the total time (green under 1.5 s, amber under 3 s, red above that), split into the time to spot the claim, the Parallel web check, and writing the right answer. Every verdict is also spoken, and the video's volume drops while the voice talks. Click the icon again, or **Stop**, to end.
 
 ### How it stays fast
 
@@ -113,7 +115,7 @@ uv run python src/stream_server.py      # listens on ws://127.0.0.1:8765/stream
 
 Measured on a real podcast-style clip, verdicts arrive about 1.4–2.7 seconds after the claim's last word is spoken. The latency is shown on every card.
 
-**Settings** (in the side panel): what to say out loud (every verdict, only false ones, or nothing), voice speed, and the server URL. Backend settings are `BLINK_STT_MODEL`, `BLINK_STEP_WORDS`, `BLINK_WINDOW_WORDS`, `AAI_MIN_TURN_SILENCE`, `AAI_MAX_TURN_SILENCE` and `FACTCHECK_PORT`.
+**Settings** (in the side panel): what to say out loud (every verdict, only false ones, or nothing), voice speed, and the server URL. Backend settings are `BLINK_STT_MODEL`, `BLINK_STEP_WORDS`, `BLINK_WINDOW_WORDS` (default 20, the minimum context; smaller is faster), `AAI_MIN_TURN_SILENCE`, `AAI_MAX_TURN_SILENCE` and `FACTCHECK_PORT`.
 
 **Privacy:** tab audio is sent to AssemblyAI to be transcribed, and claims are sent to Parallel and the AssemblyAI LLM gateway. The backend binds to `127.0.0.1` and only accepts connections from Chrome extensions.
 

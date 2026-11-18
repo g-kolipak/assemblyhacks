@@ -48,8 +48,11 @@ SAMPLE_RATE = 16000
 # Run claim detection after this many new words. Detection is coalesced (one
 # call in flight, always on the newest words), so a small step costs little.
 STEP_WORDS = int(os.environ.get("BLINK_STEP_WORDS", "2"))
-# Words of transcript the detector sees (older speech gives context).
-WINDOW_WORDS = int(os.environ.get("BLINK_WINDOW_WORDS", "45"))
+# Words of transcript the detector sees: the minimum that fits one long claim
+# plus a little context. Measured live: 45 words -> 0.89 s median detection,
+# 15 words -> 0.51 s. Claims already checked are excluded, so older speech
+# is not needed.
+WINDOW_WORDS = int(os.environ.get("BLINK_WINDOW_WORDS", "20"))
 # AssemblyAI accepts 20-1000 ms per audio message.
 MAX_FRAME_BYTES = SAMPLE_RATE * 2  # one second of 16-bit mono
 
@@ -140,14 +143,22 @@ class ClaimWatcher:
                 logger.exception("Live claim detection failed")
                 continue
             if claims:
-                self._on_claims(claims, heard_at)
+                self._on_claims(claims, heard_at, time.perf_counter() - heard_at)
 
     async def drain(self) -> None:
         if self._task is not None:
             await self._task
 
 
-def result_event(result: CheckResult, speaker: str | None, heard_at: float) -> dict:
+def result_event(
+    result: CheckResult,
+    speaker: str | None,
+    heard_at: float,
+    detect_s: float = 0.0,
+) -> dict:
+    """Verdict message. `latency_ms` runs from when the claim's last words
+    arrived from AssemblyAI; `timings_ms` breaks it down for the meter."""
+    timings = {"detect": detect_s, **result.timings}
     return {
         "type": "verdict",
         "claim": result.claim,
@@ -159,7 +170,7 @@ def result_event(result: CheckResult, speaker: str | None, heard_at: float) -> d
         "speak": result.spoken(),
         "speaker": speaker,
         "latency_ms": round((time.perf_counter() - heard_at) * 1000),
-        "timings_ms": {k: round(v * 1000) for k, v in result.timings.items()},
+        "timings_ms": {k: round(v * 1000) for k, v in timings.items()},
     }
 
 
@@ -189,19 +200,29 @@ async def stream_handler(request: web.Request) -> web.WebSocketResponse:
         while True:
             await client.send_json(await outbox.get())
 
-    async def check(claims: list[str], heard_at: float, who: str | None) -> None:
-        outbox.put_nowait({"type": "checking", "claims": claims, "speaker": who})
+    async def check(
+        claims: list[str], heard_at: float, detect_s: float, who: str | None
+    ) -> None:
+        outbox.put_nowait(
+            {
+                "type": "checking",
+                "claims": claims,
+                "speaker": who,
+                "elapsed_ms": round(detect_s * 1000),
+            }
+        )
         try:
             await checker.check_claims(
-                claims, lambda r: outbox.put_nowait(result_event(r, who, heard_at))
+                claims,
+                lambda r: outbox.put_nowait(result_event(r, who, heard_at, detect_s)),
             )
         except Exception as e:
             logger.exception("Fact check failed")
             outbox.put_nowait({"type": "error", "message": f"Fact check failed: {e}"})
 
-    def on_claims(claims: list[str], heard_at: float) -> None:
+    def on_claims(claims: list[str], heard_at: float, detect_s: float) -> None:
         # Fire the Decisions call immediately; detection keeps running.
-        task = asyncio.create_task(check(claims, heard_at, speaker))
+        task = asyncio.create_task(check(claims, heard_at, detect_s, speaker))
         tasks.add(task)
         task.add_done_callback(tasks.discard)
 

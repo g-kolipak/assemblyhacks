@@ -59,7 +59,7 @@ async def test_watcher_coalesces_to_latest_window():
             await asyncio.sleep(0.05)
             return [f"claim from {window}"] if "tall" in window else []
 
-    watcher = ClaimWatcher(FakeChecker(), lambda claims, t: fired.extend(claims))
+    watcher = ClaimWatcher(FakeChecker(), lambda claims, t, d: fired.extend(claims))
     for w in ["a b", "a b c d", "a b c d e f", "a b c d e f tall"]:
         watcher.update(w)
         await asyncio.sleep(0)
@@ -80,7 +80,9 @@ def test_origin_check(monkeypatch):
 
 def test_result_event_shape():
     r = CheckResult("X is Y", "false", 0.1, "X is Z", "Wiki", "https://w.org")
-    e = result_event(r, "A", heard_at=0.0)
+    r.timings = {"decide": 0.7, "correction": 0.5}
+    e = result_event(r, "A", heard_at=0.0, detect_s=0.4)
+    assert e["timings_ms"] == {"detect": 400, "decide": 700, "correction": 500}
     assert e["type"] == "verdict" and e["speak"].startswith("That's false.")
     assert e["speaker"] == "A" and e["latency_ms"] >= 0
 
@@ -165,6 +167,7 @@ async def test_stream_end_to_end_with_fakes(monkeypatch):
     kinds = [e["type"] for e in events]
     assert kinds[0] == "status" and "checking" in kinds and kinds[-1] == "verdict"
     assert kinds.count("checking") == 1  # detected once, not re-checked
+    assert set(events[-1]["timings_ms"]) == {"detect", "decide", "correction"}
     verdict = events[-1]
     assert verdict["verdict"] == "false"
     assert verdict["speak"] == (
