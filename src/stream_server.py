@@ -266,9 +266,14 @@ async def _stream_youtube(
     except Exception as e:
         reason = str(e).replace("ERROR: ", "").splitlines()[0][:200]
         logger.warning("Could not load YouTube video %s: %s", video_id, reason)
-        outbox.put_nowait(
-            {"type": "error", "message": f"Couldn't load that YouTube video: {reason}"}
-        )
+        if "not a bot" in reason or "Sign in" in reason:
+            message = (
+                "YouTube is blocking blink's server from loading videos right now. "
+                "Upload the video file instead, or pick “A browser tab”."
+            )
+        else:
+            message = f"Couldn't load that YouTube video: {reason}"
+        outbox.put_nowait({"type": "error", "message": message})
         return
     player = url_audio.Player(media)
     outbox.put_nowait(
